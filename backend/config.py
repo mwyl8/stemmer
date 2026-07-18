@@ -30,7 +30,18 @@ MAX_DURATION_SECONDS = 15 * 60  # 15 minutes
 FETCH_TIMEOUT_SECONDS = 120
 DECODE_TIMEOUT_SECONDS = 120
 
+# Isolated-subprocess separation timeout (runner.py) and ffmpeg mp3-preview
+# encode timeout (pool.py). Separation is the slow one — CPU-bound, minutes
+# for a long song; encoding is just a transcode, seconds at most.
+SEPARATE_TIMEOUT_SECONDS = int(os.environ.get("STEMMER_SEPARATE_TIMEOUT_SECONDS", 900))
+ENCODE_TIMEOUT_SECONDS = 60
+MP3_BITRATE = "192k"
+
+# How often the TTL background task sweeps for expired jobs.
+PURGE_INTERVAL_SECONDS = int(os.environ.get("STEMMER_PURGE_INTERVAL_SECONDS", 300))
+
 MODES = ("music", "video", "full")
+DEFAULT_MODE = "music"
 
 # Fast/Balanced/Best map to model + shifts + segment size (decision 6, PRD §5).
 TIERS = {

@@ -21,7 +21,17 @@ from backend.config import FETCH_TIMEOUT_SECONDS, MAX_DURATION_SECONDS, MAX_UPLO
 from backend.ingest._sandbox import run_subprocess
 
 ALLOWED_SCHEMES = ("http", "https")
-ALLOWED_HOST_SUFFIXES = ("youtube.com", "youtu.be", "tiktok.com", "instagram.com")
+
+# host suffix -> source_type (the jobs.source_type column). youtu.be and
+# youtube.com both map to "youtube" — they're the same platform, just two
+# hostnames for it.
+_PLATFORM_BY_HOST_SUFFIX = {
+    "youtube.com": "youtube",
+    "youtu.be": "youtube",
+    "tiktok.com": "tiktok",
+    "instagram.com": "instagram",
+}
+ALLOWED_HOST_SUFFIXES = tuple(_PLATFORM_BY_HOST_SUFFIX)
 
 
 class InvalidURLError(ValueError):
@@ -54,6 +64,16 @@ def validate_url(url: str) -> str:
         raise InvalidURLError(f"host {host!r} is not an allowed platform (YouTube/TikTok/Instagram)")
 
     return url
+
+
+def classify_platform(url: str) -> str:
+    """youtube | tiktok | instagram, for the jobs.source_type column. Call
+    only after validate_url() has confirmed the host is one of these."""
+    host = (urlparse(url).hostname or "").lower()
+    for suffix, platform in _PLATFORM_BY_HOST_SUFFIX.items():
+        if host == suffix or host.endswith(f".{suffix}"):
+            return platform
+    raise InvalidURLError(f"host {host!r} is not an allowed platform (YouTube/TikTok/Instagram)")
 
 
 def _is_private_host(host: str) -> bool:
