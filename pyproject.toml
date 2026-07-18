@@ -1,0 +1,21 @@
+[project]
+name = "stemmer"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.139.2",
+    "librosa>=0.11.0",
+    "numpy>=2.4.6",
+    "onnxruntime>=1.27.0",
+    "pydantic>=2.13.4",
+    "soundfile>=0.14.0",
+    "uvicorn>=0.51.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.15.22",
+]

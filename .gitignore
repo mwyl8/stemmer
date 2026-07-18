@@ -1,0 +1,8 @@
+.venv/
+models/
+data/
+node_modules/
+__pycache__/
+*.wav
+*.onnx
+.DS_Store
