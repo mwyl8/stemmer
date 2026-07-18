@@ -25,7 +25,20 @@ eval = [
     "demucs>=4.0.1",
     "torch>=2.13.0",
 ]
+speech = [
+    "pytorch-lightning>=2.6.5",
+    "pyyaml>=6.0.3",
+    "spafe>=0.3.3",
+    "torch>=2.13.0",
+    "torchaudio>=2.11.0",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["backend/tests"]
+
+[tool.ruff]
+# Vendored third-party model code (backend/separators/_bandit_vendor/, see
+# its docstring) — not ours to restyle or "fix"; lint it against upstream,
+# not us.
+extend-exclude = ["backend/separators/_bandit_vendor"]
