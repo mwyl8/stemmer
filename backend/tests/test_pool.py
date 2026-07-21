@@ -20,7 +20,7 @@ def _fake_separate_factory(audio_data, sr):
     """Writes 4 fake stem wavs and returns the manifest dict, matching
     runner.separate_in_subprocess's real contract."""
 
-    def _fake(input_wav, output_dir, mode="music", tier="balanced", timeout=300):
+    def _fake(input_wav, output_dir, mode="music", tier="balanced", stem_count=4, timeout=300, job_id=None):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         out = {}
@@ -28,6 +28,8 @@ def _fake_separate_factory(audio_data, sr):
             p = output_dir / f"{name}.wav"
             sf.write(p, audio_data * 0.5, sr)
             out[name] = p
+        if job_id is not None:
+            jobs.update_progress(job_id, chunks_done=1, chunks_total=1)
         return out
 
     return _fake

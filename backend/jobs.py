@@ -4,7 +4,13 @@
 on to find work, and what a client checks to know "is this finished". `stage`
 is the granular pipeline position (queued -> downloading/decoding ->
 separating -> encoding -> done, or error) — what a client polls for a
-progress bar.
+progress bar. On top of that, `chunks_done`/`chunks_total` + `eta_seconds`
+give live sub-progress *within* the separating stage — runner.py's child
+subprocess calls `update_progress()` directly (it's a separate process, but
+shares the same SQLite file) after each chunk it finishes; see runner.py's
+module docstring for why a direct per-chunk DB write beats a pipe/callback
+here (chunk counts are small — tens, not thousands — so it never hammers
+SQLite).
 
 Also owns TTL purge: `purge_expired_jobs()` is the testable synchronous unit
 (delete stem files, mark the job row expired); `run_purge_loop()` wraps it in
@@ -14,6 +20,7 @@ a periodic background task for app.py's lifespan.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 import time
@@ -22,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 
-from backend.config import PURGE_INTERVAL_SECONDS, TTL_SECONDS
+from backend.config import DEFAULT_STEM_COUNT, PURGE_INTERVAL_SECONDS, TTL_SECONDS
 from backend.storage import get_connection, job_dir
 
 logger = logging.getLogger(__name__)
@@ -49,18 +56,21 @@ _STATUS_FOR_STAGE = {
     Stage.ERROR: "error",
 }
 
-# Approximate overall progress when a stage begins. Coarse on purpose: a
-# single blocking subprocess call backs separating/encoding, so there's no
-# finer-grained signal to report without deeper callback plumbing (out of
-# scope here — SSE/streamed progress is a v2 upgrade per the PRD).
-_PROGRESS_FOR_STAGE = {
-    Stage.QUEUED: 0.0,
-    Stage.DOWNLOADING: 0.05,
-    Stage.DECODING: 0.15,
-    Stage.SEPARATING: 0.25,
-    Stage.ENCODING: 0.9,
-    Stage.DONE: 1.0,
+# Approximate overall progress (percent, 0-100) when a stage begins/ends.
+# Separating spans [SEPARATING, ENCODING) — update_progress() interpolates
+# within that band from chunks_done/chunks_total, so progress_pct keeps
+# climbing smoothly through the slow stage instead of jumping 25 -> 90 in
+# one step.
+_PROGRESS_PCT_FOR_STAGE = {
+    Stage.QUEUED: 0,
+    Stage.DOWNLOADING: 5,
+    Stage.DECODING: 15,
+    Stage.SEPARATING: 25,
+    Stage.ENCODING: 90,
+    Stage.DONE: 100,
 }
+
+_TERMINAL_STATUSES = ("done", "error", "expired")
 
 
 @dataclass
@@ -78,26 +88,56 @@ class Job:
     stage: str
     mode: str
     tier: str
+    stem_count: int
     source_type: str
     source_ref: str | None
     content_hash: str | None
-    progress: float
+    progress_pct: int
     error: str | None
     created_at: str
     expires_at: str
+    chunks_done: int
+    chunks_total: int
+    stage_timings: dict
+    stage_started_at: str | None
+    eta_seconds: float | None
+    from_cache: bool
+    elapsed_seconds: float
     stems: list[Stem] = field(default_factory=list)
 
+    @property
+    def submitted_at(self) -> str:
+        return self.created_at
 
-def create_job(mode: str, tier: str, source_type: str, source_ref: str | None) -> str:
+
+def create_job(
+    mode: str,
+    tier: str,
+    source_type: str,
+    source_ref: str | None,
+    stem_count: int = DEFAULT_STEM_COUNT,
+) -> str:
     job_id = uuid.uuid4().hex
     now = _now_iso()
     expires_at = _iso(time.time() + TTL_SECONDS)
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO jobs (id, status, stage, mode, tier, source_type, source_ref, "
-            "content_hash, progress, error, created_at, expires_at) "
-            "VALUES (?, 'queued', ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?)",
-            (job_id, Stage.QUEUED.value, mode, tier, source_type, source_ref, now, expires_at),
+            "INSERT INTO jobs (id, status, stage, mode, tier, stem_count, source_type, source_ref, "
+            "content_hash, progress_pct, error, created_at, expires_at, stage_timings, stage_started_at) "
+            "VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?, ?, ?, ?)",
+            (
+                job_id,
+                Stage.QUEUED.value,
+                mode,
+                tier,
+                stem_count,
+                source_type,
+                source_ref,
+                now,
+                expires_at,
+                json.dumps({Stage.QUEUED.value: {"started_at": now}}),
+                now,
+            ),
         )
     return job_id
 
@@ -112,38 +152,103 @@ def get_job(job_id: str) -> Job | None:
             (job_id,),
         ).fetchall()
     stems = [Stem(name=r["name"], format=r["format"], path=r["path"], duration=r["duration"]) for r in stem_rows]
+    stage_timings = json.loads(row["stage_timings"]) if row["stage_timings"] else {}
     return Job(
         id=row["id"],
         status=row["status"],
         stage=row["stage"],
         mode=row["mode"],
         tier=row["tier"],
+        stem_count=row["stem_count"],
         source_type=row["source_type"],
         source_ref=row["source_ref"],
         content_hash=row["content_hash"],
-        progress=row["progress"],
+        progress_pct=row["progress_pct"],
         error=row["error"],
         created_at=row["created_at"],
         expires_at=row["expires_at"],
+        chunks_done=row["chunks_done"],
+        chunks_total=row["chunks_total"],
+        stage_timings=stage_timings,
+        stage_started_at=row["stage_started_at"],
+        eta_seconds=row["eta_seconds"],
+        from_cache=bool(row["from_cache"]),
+        elapsed_seconds=_compute_elapsed(row["created_at"], row["status"], stage_timings),
         stems=stems,
     )
 
 
-def update_stage(job_id: str, stage: Stage, progress: float | None = None) -> None:
-    if progress is None:
-        progress = _PROGRESS_FOR_STAGE[stage]
+def update_stage(job_id: str, stage: Stage, progress_pct: int | None = None) -> None:
+    if progress_pct is None:
+        progress_pct = _PROGRESS_PCT_FOR_STAGE[stage]
+    now = _now_iso()
     with get_connection() as conn:
+        row = conn.execute("SELECT stage, stage_timings FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        timings = json.loads(row["stage_timings"]) if row and row["stage_timings"] else {}
+        prev_stage = row["stage"] if row else None
+        if prev_stage and prev_stage in timings and "ended_at" not in timings[prev_stage]:
+            timings[prev_stage]["ended_at"] = now
+        timings.setdefault(stage.value, {})["started_at"] = now
         conn.execute(
-            "UPDATE jobs SET stage = ?, status = ?, progress = ? WHERE id = ?",
-            (stage.value, _STATUS_FOR_STAGE[stage], progress, job_id),
+            "UPDATE jobs SET stage = ?, status = ?, progress_pct = ?, stage_timings = ?, stage_started_at = ? WHERE id = ?",
+            (stage.value, _STATUS_FOR_STAGE[stage], progress_pct, json.dumps(timings), now, job_id),
         )
 
 
-def mark_error(job_id: str, error: str) -> None:
+def update_progress(job_id: str, chunks_done: int, chunks_total: int) -> None:
+    """Called once per finished chunk (batching-of-one is fine at these chunk
+    counts — see module docstring) from inside the separating stage, whether
+    that's a single Demucs pass or a chained Bandit-then-Demucs run where the
+    caller (chained_sep.py) has already folded both passes into one
+    contiguous [0, chunks_total) range so this never regresses partway
+    through. Interpolates the coarse SEPARATING->ENCODING progress_pct band
+    (integer 0-100, per PRD §4) from chunk fraction, and refines eta_seconds
+    from measured per-chunk throughput within the current stage."""
+    now = time.time()
+    frac = (chunks_done / chunks_total) if chunks_total else 0.0
+    stage_start = _PROGRESS_PCT_FOR_STAGE[Stage.SEPARATING]
+    stage_end = _PROGRESS_PCT_FOR_STAGE[Stage.ENCODING]
+    progress_pct = round(stage_start + frac * (stage_end - stage_start))
+
     with get_connection() as conn:
+        row = conn.execute("SELECT stage_started_at FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        eta = None
+        if chunks_total and chunks_done >= chunks_total:
+            eta = 0.0
+        elif row and row["stage_started_at"] and chunks_done > 0:
+            elapsed_in_stage = now - datetime.fromisoformat(row["stage_started_at"]).timestamp()
+            eta = (elapsed_in_stage / chunks_done) * (chunks_total - chunks_done)
         conn.execute(
-            "UPDATE jobs SET stage = ?, status = 'error', error = ? WHERE id = ?",
-            (Stage.ERROR.value, error, job_id),
+            "UPDATE jobs SET chunks_done = ?, chunks_total = ?, progress_pct = ?, eta_seconds = ? WHERE id = ?",
+            (chunks_done, chunks_total, progress_pct, eta, job_id),
+        )
+
+
+def set_initial_eta(job_id: str, eta_seconds: float) -> None:
+    """Seed eta_seconds from audio_duration * config.TIER_RTF before the
+    first chunk lands (pool.py calls this right before dispatching to the
+    separator); update_progress() takes over and refines it once real chunk
+    throughput is available."""
+    with get_connection() as conn:
+        conn.execute("UPDATE jobs SET eta_seconds = ? WHERE id = ?", (eta_seconds, job_id))
+
+
+def mark_from_cache(job_id: str) -> None:
+    with get_connection() as conn:
+        conn.execute("UPDATE jobs SET from_cache = 1 WHERE id = ?", (job_id,))
+
+
+def mark_error(job_id: str, error: str) -> None:
+    now = _now_iso()
+    with get_connection() as conn:
+        row = conn.execute("SELECT stage, stage_timings FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        timings = json.loads(row["stage_timings"]) if row and row["stage_timings"] else {}
+        prev_stage = row["stage"] if row else None
+        if prev_stage and prev_stage in timings and "ended_at" not in timings[prev_stage]:
+            timings[prev_stage]["ended_at"] = now
+        conn.execute(
+            "UPDATE jobs SET stage = ?, status = 'error', error = ?, stage_timings = ? WHERE id = ?",
+            (Stage.ERROR.value, error, json.dumps(timings), job_id),
         )
 
 
@@ -158,6 +263,16 @@ def add_stem(job_id: str, name: str, format: str, path: str, duration: float | N
             "INSERT INTO stems (id, job_id, name, format, path, duration) VALUES (?, ?, ?, ?, ?, ?)",
             (uuid.uuid4().hex, job_id, name, format, path, duration),
         )
+
+
+def _compute_elapsed(created_at: str, status: str, stage_timings: dict) -> float:
+    start = datetime.fromisoformat(created_at)
+    if status in _TERMINAL_STATUSES:
+        ends = [datetime.fromisoformat(v["ended_at"]) for v in stage_timings.values() if v.get("ended_at")]
+        end = max(ends) if ends else start
+    else:
+        end = datetime.now(timezone.utc)
+    return (end - start).total_seconds()
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +292,7 @@ def purge_job(job_id: str) -> bool:
         if row is None or row["status"] == "expired":
             return False
         conn.execute("DELETE FROM stems WHERE job_id = ?", (job_id,))
-        conn.execute("UPDATE jobs SET status = 'expired', progress = 0 WHERE id = ?", (job_id,))
+        conn.execute("UPDATE jobs SET status = 'expired', progress_pct = 0 WHERE id = ?", (job_id,))
     shutil.rmtree(job_dir(job_id), ignore_errors=True)
     return True
 

@@ -15,6 +15,16 @@ Two halves:
 Deliberately does not import onnxruntime/numpy-heavy separator code at
 parent-process import time — only the child process (a fresh Python
 interpreter) pays that cost, keeping the parent light.
+
+Progress (PRD §4, Phase 6): when `--job-id` is given, `_main()` wires the
+routed Separator's `on_chunk` callback straight to `jobs.update_progress()`
+— a direct SQLite write from this child process into the same jobs table
+`pool.py`'s parent process reads, no pipe back to the parent needed. Chunk
+counts for a job are small (tens, not thousands — see config.TIER_RTF /
+segment sizing), so a write per finished chunk never hammers SQLite; that's
+simpler than plumbing a pipe/queue back through subprocess.run's
+capture_output, which only ever sees the child's stdout/stderr once it's
+already exited.
 """
 
 from __future__ import annotations
@@ -39,13 +49,17 @@ def separate_in_subprocess(
     output_dir: Path,
     mode: str = "music",
     tier: str = "balanced",
+    stem_count: int = 4,
     timeout: float = 300.0,
+    job_id: str | None = None,
 ) -> dict[str, Path]:
     """Run one separation of `input_wav` in an isolated subprocess.
 
     Returns {stem_name: wav_path} for the stems written under `output_dir`.
     Raises SeparationTimeout if the child doesn't finish in time (it is
-    killed), or SeparationFailed if it exits non-zero.
+    killed), or SeparationFailed if it exits non-zero. If `job_id` is given,
+    the child reports live chunk progress onto that job's row as it works
+    (see module docstring).
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -61,7 +75,11 @@ def separate_in_subprocess(
         mode,
         "--tier",
         tier,
+        "--stem-count",
+        str(stem_count),
     ]
+    if job_id is not None:
+        cmd += ["--job-id", job_id]
     try:
         proc = subprocess.run(cmd, timeout=timeout, capture_output=True, text=True)
     except subprocess.TimeoutExpired as exc:
@@ -85,6 +103,8 @@ def _main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--mode", default="music")
     parser.add_argument("--tier", default="balanced")
+    parser.add_argument("--stem-count", type=int, default=4)
+    parser.add_argument("--job-id", default=None)
     args = parser.parse_args()
 
     audio, sr = sf.read(args.input, dtype="float32", always_2d=True)
@@ -92,8 +112,15 @@ def _main() -> None:
         raise SeparationFailed(f"expected {MUSIC_SAMPLE_RATE} Hz input, got {sr}")
     audio = audio.T  # (samples, channels) -> (channels, samples)
 
-    separator = select_separator(args.mode, args.tier)  # loads the model once
-    stems = separator.separate(audio)
+    on_chunk = None
+    if args.job_id is not None:
+        from backend import jobs
+
+        def on_chunk(done: int, total: int) -> None:
+            jobs.update_progress(args.job_id, chunks_done=done, chunks_total=total)
+
+    separator = select_separator(args.mode, args.tier, stem_count=args.stem_count)  # loads the model once
+    stems = separator.separate(audio, on_chunk=on_chunk)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

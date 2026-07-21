@@ -15,6 +15,7 @@ Modes: **Music + Video + Full chained**. Stems: **4-stem music + speech/music/ef
 - **State in SQLite + files.** `storage.py` owns the DB (jobs, stems, cache). Stems on disk. Dedup by **content hash**.
 - **Quality/speed is config**, not branching — tiers in `config.py`.
 - **Frontend**: React + Vite + Tailwind; stem player is `wavesurfer.js` + multitrack plugin.
+- **Progress is real, never faked.** The worker reports `chunks_done / chunks_total` as it goes; the UI shows a live elapsed timer, a chunk-derived progress bar, an ETA from the tier's measured real-time factor, and per-stage timings. Never ship an indeterminate spinner for separation — the chunk loop already knows the true fraction complete.
 
 ## 4. Tech choices (chosen per layer on merit)
 - **API:** FastAPI (async, Python-native for the models).
@@ -46,4 +47,4 @@ Phase 0 skeleton/env → 1 Demucs **via ONNX (quantized)** behind the interface,
 - **Do not rebase shared branches.** Squash-merge; feature branches stay linear.
 
 ## 7. Definition of done (v1)
-File **and** public link (YT/TikTok/IG) both produce stems; Music + Video + chained Full mode work; CPU-only via **quantized ONNX** within the agreed latency (numbers recorded per tier); **worker pool** runs up to N concurrent jobs; multitrack player with per-stem waveform + mute/solo/volume + downloads (wav/mp3/zip); content-hash cache; TTL auto-purge; `test_router` + `test_ingest` green; eval harness reports per-tier SDR + latency.
+File **and** public link (YT/TikTok/IG) both produce stems; Music + Video + chained Full mode work; CPU-only via **quantized ONNX** within the agreed latency (numbers recorded per tier); **worker pool** runs up to N concurrent jobs; multitrack player with per-stem waveform + mute/solo/volume + downloads (wav/mp3/zip); progress UI with live elapsed timer, chunk-derived bar, ETA and per-stage timings; content-hash cache; TTL auto-purge; `test_router` + `test_ingest` green; eval harness reports per-tier SDR + latency.

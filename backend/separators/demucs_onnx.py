@@ -26,6 +26,7 @@ audio away from the position the STFT/model expects it in.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -71,7 +72,15 @@ class DemucsONNXSeparator(Separator):
         self.segment_length = min(requested, self.training_length)
         self.overlap = overlap
 
-    def separate(self, audio: np.ndarray) -> dict[str, np.ndarray]:
+    def num_chunks(self, length: int) -> int:
+        """Chunk count for an input of `length` samples — depends only on
+        length + this separator's segment/overlap config, not on audio
+        content, so callers (chained_sep.py) can total up progress across
+        passes before either one has actually run."""
+        stride = max(int((1 - self.overlap) * self.segment_length), 1)
+        return len(range(0, length, stride))
+
+    def separate(self, audio: np.ndarray, on_chunk: Callable[[int, int], None] | None = None) -> dict[str, np.ndarray]:
         mix = np.ascontiguousarray(audio, dtype=np.float32)
         if mix.ndim != 2:
             raise ValueError(f"expected (channels, samples), got shape {mix.shape}")
@@ -79,17 +88,23 @@ class DemucsONNXSeparator(Separator):
 
         stride = max(int((1 - self.overlap) * self.segment_length), 1)
         weight = _crossfade_weight(self.segment_length)
+        offsets = list(range(0, length, stride))
+        total = len(offsets)
+        if on_chunk is not None:
+            on_chunk(0, total)
 
         n_sources = len(self.sources)
         out = np.zeros((n_sources, self.audio_channels, length), dtype=np.float64)
         sum_weight = np.zeros(length, dtype=np.float64)
 
-        for offset in range(0, length, stride):
+        for i, offset in enumerate(offsets):
             chunk_len = min(self.segment_length, length - offset)
             chunk_out = self._run_chunk(mix, offset, chunk_len)  # (S, C, chunk_len)
             w = weight[:chunk_len]
             out[:, :, offset : offset + chunk_len] += chunk_out * w
             sum_weight[offset : offset + chunk_len] += w
+            if on_chunk is not None:
+                on_chunk(i + 1, total)
 
         out /= np.maximum(sum_weight, 1e-8)
         return {name: out[i].astype(np.float32) for i, name in enumerate(self.sources)}

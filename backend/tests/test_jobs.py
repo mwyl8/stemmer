@@ -12,7 +12,7 @@ def test_create_job_starts_queued(db):
     job = jobs.get_job(job_id)
     assert job.status == "queued"
     assert job.stage == jobs.Stage.QUEUED.value
-    assert job.progress == 0
+    assert job.progress_pct == 0
     assert job.mode == "music"
     assert job.tier == "balanced"
     assert job.source_type == "upload"
@@ -33,7 +33,8 @@ def test_update_stage_advances_status_and_progress(db):
     job = jobs.get_job(job_id)
     assert job.stage == "decoding"
     assert job.status == "running"
-    assert 0 < job.progress < 1
+    assert 0 < job.progress_pct < 100
+    assert isinstance(job.progress_pct, int)
 
     jobs.update_stage(job_id, jobs.Stage.SEPARATING)
     assert jobs.get_job(job_id).stage == "separating"
@@ -42,7 +43,7 @@ def test_update_stage_advances_status_and_progress(db):
     job = jobs.get_job(job_id)
     assert job.stage == "done"
     assert job.status == "done"
-    assert job.progress == 1.0
+    assert job.progress_pct == 100
 
 
 def test_mark_error_sets_error_stage_and_message(db):
@@ -126,3 +127,85 @@ def test_purge_expired_jobs_skips_already_expired(db):
     # a later sweep shouldn't try (and fail) to re-purge an already-expired job
     purged = jobs.purge_expired_jobs(now=time.time() + 24 * 3600 + 1)
     assert purged == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: chunk progress, eta, from_cache, stem_count, stage_timings.
+# ---------------------------------------------------------------------------
+
+
+def test_create_job_defaults_to_four_stem(db):
+    job_id = jobs.create_job("music", "fast", "upload", "song.mp3")
+    assert jobs.get_job(job_id).stem_count == 4
+
+
+def test_create_job_accepts_explicit_stem_count(db):
+    job_id = jobs.create_job("music", "fast", "upload", "song.mp3", stem_count=6)
+    assert jobs.get_job(job_id).stem_count == 6
+
+
+def test_update_progress_advances_progress_and_never_exceeds_total(db):
+    job_id = jobs.create_job("music", "fast", "upload", "song.mp3")
+    jobs.update_stage(job_id, jobs.Stage.SEPARATING)
+
+    seen = []
+    for done in range(6):
+        jobs.update_progress(job_id, chunks_done=done, chunks_total=5)
+        job = jobs.get_job(job_id)
+        seen.append(job.progress_pct)
+        assert isinstance(job.progress_pct, int)
+        assert job.chunks_done <= job.chunks_total
+
+    assert seen == sorted(seen)  # progress never regresses as chunks land
+    assert jobs.get_job(job_id).chunks_done == 5
+
+
+def test_update_progress_sets_eta_zero_once_all_chunks_done(db):
+    job_id = jobs.create_job("music", "fast", "upload", "song.mp3")
+    jobs.update_stage(job_id, jobs.Stage.SEPARATING)
+    jobs.update_progress(job_id, chunks_done=4, chunks_total=4)
+    assert jobs.get_job(job_id).eta_seconds == 0.0
+
+
+def test_set_initial_eta_before_any_chunk_lands(db):
+    job_id = jobs.create_job("music", "fast", "upload", "song.mp3")
+    jobs.set_initial_eta(job_id, 42.5)
+    assert jobs.get_job(job_id).eta_seconds == 42.5
+
+
+def test_mark_from_cache(db):
+    job_id = jobs.create_job("music", "fast", "upload", "song.mp3")
+    assert jobs.get_job(job_id).from_cache is False
+    jobs.mark_from_cache(job_id)
+    assert jobs.get_job(job_id).from_cache is True
+
+
+def test_stage_timings_record_start_and_end_per_stage(db):
+    job_id = jobs.create_job("music", "fast", "upload", "song.mp3")
+    jobs.update_stage(job_id, jobs.Stage.DECODING)
+    jobs.update_stage(job_id, jobs.Stage.SEPARATING)
+    job = jobs.get_job(job_id)
+
+    assert "queued" in job.stage_timings
+    assert job.stage_timings["queued"]["ended_at"]  # closed out when decoding began
+    assert "decoding" in job.stage_timings
+    assert job.stage_timings["decoding"]["started_at"]
+    assert job.stage_timings["decoding"]["ended_at"]  # closed out when separating began
+    assert "separating" in job.stage_timings
+    assert job.stage_timings["separating"]["started_at"]
+    assert "ended_at" not in job.stage_timings["separating"]  # still the current stage
+
+
+def test_submitted_at_aliases_created_at(db):
+    job_id = jobs.create_job("music", "fast", "upload", "song.mp3")
+    job = jobs.get_job(job_id)
+    assert job.submitted_at == job.created_at
+
+
+def test_elapsed_seconds_is_nonnegative_and_grows_while_running(db):
+    job_id = jobs.create_job("music", "fast", "upload", "song.mp3")
+    first = jobs.get_job(job_id).elapsed_seconds
+    assert first >= 0
+    time.sleep(0.05)
+    second = jobs.get_job(job_id).elapsed_seconds
+    assert second >= first

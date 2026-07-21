@@ -1,5 +1,68 @@
 @import 'tailwindcss';
 
+/* Design system (Phase 7a): dark-only, built on Tailwind's slate (surfaces/
+ * text) + indigo (accent) scales already used throughout the app — these
+ * tokens just name the recurring roles so new components stay consistent
+ * with the existing ones rather than picking shades ad hoc. */
+@theme {
+  --color-surface: var(--color-slate-950);
+  --color-surface-raised: var(--color-slate-900);
+  --color-surface-inset: color-mix(in oklab, var(--color-slate-900) 60%, transparent);
+  --color-border-subtle: var(--color-slate-800);
+  --color-border: var(--color-slate-700);
+  --color-text: var(--color-slate-100);
+  --color-text-muted: var(--color-slate-400);
+  --color-text-faint: var(--color-slate-500);
+  --color-accent: var(--color-indigo-500);
+  --color-accent-hover: var(--color-indigo-400);
+  --color-accent-soft: color-mix(in oklab, var(--color-indigo-500) 20%, transparent);
+  --color-success: var(--color-emerald-400);
+  --color-danger: var(--color-red-400);
+  --color-warning: var(--color-amber-400);
+  --animate-shimmer: shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
 body {
   @apply bg-slate-950 text-slate-100 antialiased;
+  color-scheme: dark;
+}
+
+/* A visible, consistent focus ring for every interactive element — buttons,
+ * sliders, waveform regions — rather than relying on (or suppressing) each
+ * browser's own default outline. Only shows for keyboard/AT focus, not mouse
+ * clicks, via :focus-visible. */
+.focus-ring {
+  @apply outline-none;
+}
+.focus-ring:focus-visible {
+  @apply ring-2 ring-indigo-400 ring-offset-2 ring-offset-slate-950;
+}
+
+.skeleton {
+  @apply animate-[shimmer_1.6s_ease-in-out_infinite] rounded-md bg-[length:200%_100%];
+  background-image: linear-gradient(90deg, var(--color-slate-800) 25%, var(--color-slate-700) 50%, var(--color-slate-800) 75%);
+}
+
+/* Thin, dark-theme-consistent scrollbar for the horizontally-scrolling
+ * multitrack waveform container (the default scrollbar is jarring on a
+ * near-black background). */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-slate-700) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: var(--color-slate-700);
+  border-radius: 9999px;
 }

@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 from backend import jobs
-from backend.config import DEFAULT_MODE, DEFAULT_TIER, MAX_UPLOAD_BYTES, MODES, TIERS
+from backend.config import DEFAULT_MODE, DEFAULT_STEM_COUNT, DEFAULT_TIER, MAX_UPLOAD_BYTES, MODES, STEM_COUNTS, TIERS
 from backend.ingest.fetch import InvalidURLError, classify_platform, validate_url
 from backend.pool import WorkerPool
 from backend.storage import init_db
@@ -72,7 +72,7 @@ async def _submit_file_job(request: Request) -> str:
     upload = form.get("file")
     if upload is None or not hasattr(upload, "read"):
         raise HTTPException(422, "multipart submission requires a 'file' field")
-    mode, tier = _validate_mode_tier(form.get("mode"), form.get("tier"))
+    mode, tier, stem_count = _validate_mode_tier_stems(form.get("mode"), form.get("tier"), form.get("stem_count"))
 
     upload_dir = Path(tempfile.mkdtemp(prefix="stemmer-upload-"))
     dest = upload_dir / (upload.filename or "upload")
@@ -90,7 +90,7 @@ async def _submit_file_job(request: Request) -> str:
     finally:
         await upload.close()
 
-    return jobs.create_job(mode, tier, "upload", str(dest))
+    return jobs.create_job(mode, tier, "upload", str(dest), stem_count=stem_count)
 
 
 async def _submit_url_job(request: Request) -> str:
@@ -102,7 +102,7 @@ async def _submit_url_job(request: Request) -> str:
     url = body.get("url")
     if not url:
         raise HTTPException(422, "JSON submission requires a 'url' field")
-    mode, tier = _validate_mode_tier(body.get("mode"), body.get("tier"))
+    mode, tier, stem_count = _validate_mode_tier_stems(body.get("mode"), body.get("tier"), body.get("stem_count"))
 
     try:
         validate_url(url)
@@ -110,17 +110,24 @@ async def _submit_url_job(request: Request) -> str:
     except InvalidURLError as exc:
         raise HTTPException(400, str(exc)) from exc
 
-    return jobs.create_job(mode, tier, source_type, url)
+    return jobs.create_job(mode, tier, source_type, url, stem_count=stem_count)
 
 
-def _validate_mode_tier(mode: str | None, tier: str | None) -> tuple[str, str]:
+def _validate_mode_tier_stems(mode: str | None, tier: str | None, stem_count: str | int | None) -> tuple[str, str, int]:
     mode = mode or DEFAULT_MODE
     tier = tier or DEFAULT_TIER
+    stem_count = DEFAULT_STEM_COUNT if stem_count is None else stem_count
     if mode not in MODES:
         raise HTTPException(422, f"mode must be one of {MODES}")
     if tier not in TIERS:
         raise HTTPException(422, f"tier must be one of {tuple(TIERS)}")
-    return mode, tier
+    try:
+        stem_count = int(stem_count)
+    except (TypeError, ValueError):
+        raise HTTPException(422, f"stem_count must be one of {STEM_COUNTS}") from None
+    if stem_count not in STEM_COUNTS:
+        raise HTTPException(422, f"stem_count must be one of {STEM_COUNTS}")
+    return mode, tier, stem_count
 
 
 def _job_summary(job: jobs.Job) -> dict:
@@ -128,12 +135,21 @@ def _job_summary(job: jobs.Job) -> dict:
         "id": job.id,
         "status": job.status,
         "stage": job.stage,
-        "progress": job.progress,
+        "progress_pct": job.progress_pct,
         "mode": job.mode,
         "tier": job.tier,
+        "stem_count": job.stem_count,
         "error": job.error,
         "created_at": job.created_at,
         "expires_at": job.expires_at,
+        "submitted_at": job.submitted_at,
+        "stage_started_at": job.stage_started_at,
+        "stage_timings": job.stage_timings,
+        "chunks_done": job.chunks_done,
+        "chunks_total": job.chunks_total,
+        "elapsed_seconds": job.elapsed_seconds,
+        "eta_seconds": job.eta_seconds,
+        "from_cache": job.from_cache,
         "stems": [{"name": s.name, "format": s.format, "duration": s.duration} for s in job.stems],
     }
 

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
 import ProgressStages from '../components/ProgressStages'
 import ResultView from '../components/ResultView'
+import { JobPageSkeleton } from '../components/Skeletons'
 import useJobPolling from '../hooks/useJobPolling'
 import { deleteJob } from '../api'
 
@@ -24,14 +25,15 @@ export default function JobPage() {
   }
 
   if (loading) {
-    return <CenteredMessage>Loading job…</CenteredMessage>
+    return <JobPageSkeleton />
   }
 
   if (error) {
     return (
-      <CenteredMessage>
+      <CenteredMessage role="alert">
+        <ErrorIcon />
         <p className="text-red-300">{error.status === 404 ? 'Job not found.' : error.message}</p>
-        <Link to="/" className="mt-4 inline-block text-indigo-300 hover:underline">
+        <Link to="/" className="focus-ring mt-2 inline-block rounded text-indigo-300 hover:underline">
           Start a new job
         </Link>
       </CenteredMessage>
@@ -40,9 +42,9 @@ export default function JobPage() {
 
   if (deleted || job.status === 'expired') {
     return (
-      <CenteredMessage>
+      <CenteredMessage role="status">
         <p>This job's stems have been deleted.</p>
-        <Link to="/" className="mt-4 inline-block text-indigo-300 hover:underline">
+        <Link to="/" className="focus-ring mt-2 inline-block rounded text-indigo-300 hover:underline">
           Start a new job
         </Link>
       </CenteredMessage>
@@ -51,10 +53,11 @@ export default function JobPage() {
 
   if (job.status === 'error') {
     return (
-      <CenteredMessage>
+      <CenteredMessage role="alert">
+        <ErrorIcon />
         <p className="font-medium text-slate-100">Separation failed</p>
-        <p className="mt-2 max-w-lg text-sm text-red-300">{job.error}</p>
-        <Link to="/" className="mt-4 inline-block text-indigo-300 hover:underline">
+        <p className="mt-1 max-w-lg text-sm text-red-300">{job.error}</p>
+        <Link to="/" className="focus-ring mt-2 inline-block rounded text-indigo-300 hover:underline">
           Start a new job
         </Link>
       </CenteredMessage>
@@ -74,11 +77,25 @@ export default function JobPage() {
           {job.tier} tier — this page updates on its own, no need to refresh.
         </p>
       </div>
-      <ProgressStages stage={job.stage} progress={job.progress} skipDownload={skipDownload} />
+      <div aria-live="polite">
+        <ProgressStages job={job} skipDownload={skipDownload} />
+      </div>
     </div>
   )
 }
 
-function CenteredMessage({ children }) {
-  return <div className="mx-auto flex max-w-xl flex-col items-center gap-2 px-4 py-24 text-center text-slate-300">{children}</div>
+function CenteredMessage({ children, role }) {
+  return (
+    <div role={role} className="mx-auto flex max-w-xl flex-col items-center gap-2 px-4 py-24 text-center text-slate-300">
+      {children}
+    </div>
+  )
+}
+
+function ErrorIcon() {
+  return (
+    <span className="mb-1 flex h-10 w-10 items-center justify-center rounded-full bg-red-950/60 text-lg text-red-400" aria-hidden="true">
+      !
+    </span>
+  )
 }

@@ -23,7 +23,7 @@ import soundfile as sf
 
 from backend import cache, jobs
 from backend import runner as runner_mod
-from backend.config import ENCODE_TIMEOUT_SECONDS, MP3_BITRATE, POOL_SIZE, SEPARATE_TIMEOUT_SECONDS
+from backend.config import ENCODE_TIMEOUT_SECONDS, MP3_BITRATE, POOL_SIZE, SEPARATE_TIMEOUT_SECONDS, TIER_RTF
 from backend.ingest import IngestError
 from backend.ingest import ingest as ingest_fn
 from backend.ingest._sandbox import run_subprocess
@@ -102,14 +102,23 @@ def process_job(job_id: str) -> None:
 
         cached_job_id = cache.find(result.content_hash, job.mode, job.tier)
         if cached_job_id is not None:
+            jobs.mark_from_cache(job_id)
             _copy_cached_stems(cached_job_id, job_id)
             jobs.update_stage(job_id, jobs.Stage.DONE)
             return
 
         jobs.update_stage(job_id, jobs.Stage.SEPARATING)
+        audio_duration = sf.info(result.wav_path).duration
+        jobs.set_initial_eta(job_id, audio_duration * TIER_RTF.get(job.tier, TIER_RTF["balanced"]))
         output_dir = job_dir(job_id)
         stems = runner_mod.separate_in_subprocess(
-            result.wav_path, output_dir, mode=job.mode, tier=job.tier, timeout=SEPARATE_TIMEOUT_SECONDS
+            result.wav_path,
+            output_dir,
+            mode=job.mode,
+            tier=job.tier,
+            stem_count=job.stem_count,
+            timeout=SEPARATE_TIMEOUT_SECONDS,
+            job_id=job_id,
         )
 
         jobs.update_stage(job_id, jobs.Stage.ENCODING)

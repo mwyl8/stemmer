@@ -1,0 +1,579 @@
+<style>
+  body{font-family:ui-sans-serif,-apple-system,system-ui,sans-serif;max-width:1060px;margin:0 auto;padding:32px 24px;color:#1a1a1a;background:#fff;line-height:1.55}
+  h1{font-size:28px;margin:0 0 6px}
+  h2{font-size:20px;margin:44px 0 4px;padding-top:18px;border-top:2px solid #1a1a1a}
+  h3{font-size:15px;margin:26px 0 8px;color:#444}
+  .sub{color:#666;font-size:14px;margin:0 0 22px}
+  .note{background:#f6f7f9;border-left:3px solid #888;padding:10px 14px;margin:14px 0;font-size:13px}
+  .warn{background:#fff6f2;border-left:3px solid #d2703a;padding:10px 14px;margin:14px 0;font-size:13px}
+  svg{display:block;margin:14px 0 6px;max-width:100%;height:auto}
+  .lbl{font-size:12px;fill:#1a1a1a;font-weight:600}
+  .num{font-size:11px;fill:#fff;font-weight:700}
+  .tiny{font-size:10.5px;fill:#555}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;fill:#1a1a1a}
+  .cap{font-size:11px;fill:#666;font-weight:700;letter-spacing:.06em}
+  ul{font-size:14px}li{margin:5px 0}
+  code{font-family:ui-monospace,Menlo,monospace;background:#f0f1f3;padding:1px 5px;border-radius:3px;font-size:13px}
+  table{border-collapse:collapse;width:100%;font-size:13px;margin:12px 0}
+  th,td{border:1px solid #ddd;padding:7px 9px;text-align:left;vertical-align:top}
+  th{background:#f6f7f9}
+  @media print{h2{page-break-before:auto}svg{page-break-inside:avoid}}
+</style>
+
+<h1>Stemmer — The Complete Pipeline, Step by Step</h1>
+<p class="sub">Every stage from the PyTorch checkpoint through ONNX export, encoding, the transformer, decoding, and back out to audio files. Steps are numbered A1–H6 so nothing is skipped and any step can be referenced directly. Next steps and open questions are at the end.</p>
+
+<div class="note"><strong>The one-line map:</strong> PyTorch is used <em>once, offline</em> to produce a frozen <code>.onnx</code> file. At runtime, audio is fetched → decoded → chunked → STFT'd in NumPy → pushed through the ONNX graph (encode → transformer → decode) → ISTFT'd back in NumPy → overlap-added → written as stems.</div>
+
+<h2>Phase A — Build time (offline, once). PyTorch present.</h2>
+
+<svg viewBox="0 0 1000 470" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#666"/></marker></defs>
+<rect x="2" y="2" width="996" height="466" fill="#f4f8fb" stroke="#4a7ba7" stroke-width="2" stroke-dasharray="7 5" rx="10"/>
+<text x="20" y="26" class="cap" fill="#4a7ba7">PYTORCH WORLD — RUNS ON YOUR MACHINE, PRODUCES ONE FILE</text>
+
+<!-- A1 -->
+<rect x="22" y="42" width="220" height="74" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="60" r="11" fill="#4a7ba7"/><text x="35" y="64" class="num">A1</text>
+<text x="58" y="64" class="lbl">The checkpoint</text>
+<text x="34" y="84" class="mono">{"encoder.0.conv.weight": […],</text>
+<text x="34" y="98" class="mono"> "transformer.attn.Wq": […]}</text>
+<text x="34" y="112" class="tiny">~40M numbers. No structure.</text>
+
+<rect x="262" y="42" width="220" height="74" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="280" cy="60" r="11" fill="#4a7ba7"/><text x="275" y="64" class="num">A2</text>
+<text x="298" y="64" class="lbl">The architecture</text>
+<text x="274" y="84" class="mono">class HTDemucs(nn.Module):</text>
+<text x="274" y="98" class="mono">  def forward(self, x): …</text>
+<text x="274" y="112" class="tiny">Python code = assembly instructions.</text>
+
+<path d="M132,120 L230,150" stroke="#666" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+<path d="M372,120 L280,150" stroke="#666" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+<rect x="150" y="156" width="212" height="56" fill="#fff" stroke="#333" stroke-width="1.8" rx="6"/>
+<circle cx="168" cy="174" r="11" fill="#4a7ba7"/><text x="163" y="178" class="num">A3</text>
+<text x="186" y="178" class="lbl">Live model instantiated</text>
+<text x="162" y="198" class="tiny">weights loaded into the structure</text>
+
+<path d="M256,216 L256,240" stroke="#666" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+<rect x="118" y="246" width="276" height="66" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="136" cy="264" r="11" fill="#4a7ba7"/><text x="131" y="268" class="num">A4</text>
+<text x="154" y="268" class="lbl">Refactor: split at the STFT boundary</text>
+<text x="130" y="288" class="tiny">real-valued core stays; STFT/ISTFT move outside</text>
+<text x="130" y="302" class="mono">_demucs_core.py</text>
+
+<path d="M256,316 L256,340" stroke="#666" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+<rect x="118" y="346" width="276" height="60" fill="#fff" stroke="#2e7d5b" stroke-width="2" rx="6"/>
+<circle cx="136" cy="364" r="11" fill="#2e7d5b"/><text x="131" y="368" class="num">A5</text>
+<text x="154" y="368" class="lbl" fill="#2e7d5b">VERIFY: refactor == original</text>
+<text x="130" y="390" class="mono">max diff must be 0.0</text>
+
+<!-- right column -->
+<path d="M400,376 L470,376" stroke="#666" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+<rect x="478" y="246" width="230" height="76" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="496" cy="264" r="11" fill="#4a7ba7"/><text x="491" y="268" class="num">A6</text>
+<text x="514" y="268" class="lbl">Dummy input created</text>
+<text x="490" y="288" class="tiny">correct SHAPE (a 7.8 s chunk);</text>
+<text x="490" y="302" class="tiny">contents irrelevant — noise works</text>
+<text x="490" y="316" class="mono">(2, ~344k samples)</text>
+
+<rect x="478" y="346" width="230" height="76" fill="#fff" stroke="#c0842b" stroke-width="2" rx="6"/>
+<circle cx="496" cy="364" r="11" fill="#c0842b"/><text x="491" y="368" class="num">A7</text>
+<text x="514" y="368" class="lbl" fill="#c0842b">TRACE — run it once</text>
+<text x="490" y="388" class="tiny">every tensor op announces itself;</text>
+<text x="490" y="402" class="tiny">exporter translates each into ONNX ops;</text>
+<text x="490" y="416" class="tiny">loops unroll, ifs collapse to one branch</text>
+
+<path d="M712,384 L748,384" stroke="#666" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+<path d="M594,330 L594,344" stroke="#666" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+
+<rect x="756" y="346" width="222" height="76" fill="#fff" stroke="#333" stroke-width="1.8" rx="6"/>
+<circle cx="774" cy="364" r="11" fill="#4a7ba7"/><text x="769" y="368" class="num">A8</text>
+<text x="792" y="368" class="lbl">htdemucs.onnx written</text>
+<text x="768" y="388" class="tiny">graph + weights baked into one file</text>
+<text x="768" y="404" class="mono">166 MB — self-describing</text>
+
+<rect x="756" y="42" width="222" height="90" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="774" cy="60" r="11" fill="#4a7ba7"/><text x="769" y="64" class="num">A9</text>
+<text x="792" y="64" class="lbl">Optional: quantize int8</text>
+<text x="768" y="84" class="mono">166 MB → 56 MB</text>
+<text x="768" y="102" class="tiny">SHELVED: hurts quality on this</text>
+<text x="768" y="116" class="tiny">transformer + no ARM speedup</text>
+
+<rect x="478" y="42" width="230" height="90" fill="#fff" stroke="#2e7d5b" stroke-width="2" rx="6"/>
+<circle cx="496" cy="60" r="11" fill="#2e7d5b"/><text x="491" y="64" class="num">A10</text>
+<text x="518" y="64" class="lbl" fill="#2e7d5b">VERIFY: ONNX vs oracle</text>
+<text x="490" y="84" class="mono">max diff ≈ 2e-4  (−74 dB)</text>
+<text x="490" y="102" class="tiny">inaudible; different kernels round</text>
+<text x="490" y="116" class="tiny">differently. This is the regression guard.</text>
+
+<path d="M866,340 L866,140" stroke="#666" stroke-width="1.4" fill="none" marker-end="url(#ar)"/>
+<path d="M756,384 L740,384" stroke="none"/>
+</svg>
+
+<div class="warn"><strong>Why tracing is required:</strong> Python is dynamic — loops, conditionals, dispatch — so you cannot statically read a flat op-list out of it. Running it once and recording what happened is the only reliable reduction. This is also exactly where the two export failures surfaced: <code>torch.stft</code> produces <strong>complex numbers</strong> (no ONNX data type), and <strong>data-dependent asserts</strong> branch on runtime values a static graph can't express. Both were moved outside the graph in A4.</div>
+
+<h2>Phase B — Runtime: request and ingest</h2>
+
+<svg viewBox="0 0 1000 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="2" y="2" width="996" height="246" fill="#f5faf6" stroke="#2e7d5b" stroke-width="2" stroke-dasharray="7 5" rx="10"/>
+<text x="20" y="26" class="cap" fill="#2e7d5b">RUNTIME — NO PYTORCH ANYWHERE FROM HERE ON</text>
+
+<rect x="22" y="42" width="176" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="60" r="11" fill="#2e7d5b"/><text x="35" y="64" class="num">B1</text>
+<text x="58" y="64" class="lbl">POST /jobs</text>
+<text x="34" y="84" class="tiny">file upload or {url, mode, tier}</text>
+<text x="34" y="100" class="tiny">job row created → "queued"</text>
+
+<path d="M202,77 L226,77" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="232" y="42" width="176" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="250" cy="60" r="11" fill="#2e7d5b"/><text x="245" y="64" class="num">B2</text>
+<text x="268" y="64" class="lbl">Worker pool</text>
+<text x="244" y="84" class="tiny">cap = POOL_SIZE (N)</text>
+<text x="244" y="100" class="tiny">extras wait in line</text>
+
+<path d="M412,77 L436,77" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="442" y="42" width="176" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="460" cy="60" r="11" fill="#2e7d5b"/><text x="455" y="64" class="num">B3</text>
+<text x="478" y="64" class="lbl">Subprocess spawned</text>
+<text x="454" y="84" class="tiny">isolated memory, killable,</text>
+<text x="454" y="100" class="tiny">model loaded ONCE</text>
+
+<path d="M622,77 L646,77" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="652" y="42" width="200" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="670" cy="60" r="11" fill="#2e7d5b"/><text x="665" y="64" class="num">B4</text>
+<text x="688" y="64" class="lbl">yt-dlp (if a URL)</text>
+<text x="664" y="84" class="tiny">URL validated, host allow-listed,</text>
+<text x="664" y="100" class="tiny">size/duration capped, timeout</text>
+
+<path d="M112,118 L112,142" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+<path d="M752,118 L300,142" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="22" y="150" width="266" height="76" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="168" r="11" fill="#2e7d5b"/><text x="35" y="172" class="num">B5</text>
+<text x="58" y="172" class="lbl">ffmpeg decode → canonical WAV</text>
+<text x="34" y="192" class="mono">44,100 Hz · stereo · float32</text>
+<text x="34" y="210" class="tiny">(16 kHz mono variant for the speech-only path)</text>
+
+<path d="M292,188 L316,188" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="322" y="150" width="240" height="76" fill="#fff" stroke="#c0842b" stroke-width="2" rx="6"/>
+<circle cx="340" cy="168" r="11" fill="#c0842b"/><text x="335" y="172" class="num">B6</text>
+<text x="358" y="172" class="lbl">Content hash → cache check</text>
+<text x="334" y="192" class="tiny">same audio + mode + tier seen before?</text>
+<text x="334" y="210" class="tiny">HIT → return stems instantly, skip everything</text>
+
+<path d="M566,188 L590,188" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="596" y="150" width="256" height="76" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="614" cy="168" r="11" fill="#2e7d5b"/><text x="609" y="172" class="num">B7</text>
+<text x="632" y="172" class="lbl">Router picks the separator(s)</text>
+<text x="608" y="192" class="tiny">Music → Demucs · Video → Bandit</text>
+<text x="608" y="210" class="tiny">Full → Bandit first, then Demucs on the music bus</text>
+</svg>
+
+<h2>Phase C — Preprocessing in NumPy (outside the ONNX graph)</h2>
+
+<svg viewBox="0 0 1000 250" xmlns="http://www.w3.org/2000/svg">
+<rect x="2" y="2" width="996" height="246" fill="#fdf7f2" stroke="#c0842b" stroke-width="2" stroke-dasharray="7 5" rx="10"/>
+<text x="20" y="26" class="cap" fill="#c0842b">NUMPY — THIS IS WHERE COMPLEX NUMBERS LIVE</text>
+
+<rect x="22" y="42" width="220" height="72" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="60" r="11" fill="#c0842b"/><text x="35" y="64" class="num">C1</text>
+<text x="58" y="64" class="lbl">Chunk the audio</text>
+<text x="34" y="84" class="tiny">~7.8 s segments (the length htdemucs</text>
+<text x="34" y="98" class="tiny">was trained on), with overlap</text>
+<text x="34" y="112" class="mono">edges get REAL context, not zero-pad</text>
+
+<path d="M246,78 L270,78" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="276" y="42" width="250" height="72" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="294" cy="60" r="11" fill="#c0842b"/><text x="289" y="64" class="num">C2</text>
+<text x="312" y="64" class="lbl">STFT (hand-written NumPy)</text>
+<text x="288" y="84" class="mono">n_fft 4096 (93 ms) · hop 1024 (23 ms)</text>
+<text x="288" y="98" class="mono">Hann · center=True · reflect · onesided</text>
+<text x="288" y="112" class="tiny">matches torch.stft to ~1e-6</text>
+
+<path d="M530,78 L554,78" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="560" y="42" width="200" height="72" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="578" cy="60" r="11" fill="#c0842b"/><text x="573" y="64" class="num">C3</text>
+<text x="596" y="64" class="lbl">Complex spectrogram</text>
+<text x="572" y="84" class="mono">(2, 2049, T) complex</text>
+<text x="572" y="100" class="tiny">2049 = 4096/2+1 · each bin ≈ 10.8 Hz</text>
+<text x="572" y="112" class="tiny">top bin dropped → 2048</text>
+
+<path d="M764,78 L788,78" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="794" y="42" width="184" height="72" fill="#fff" stroke="#333" stroke-width="1.8" rx="6"/>
+<circle cx="812" cy="60" r="11" fill="#c0842b"/><text x="807" y="64" class="num">C4</text>
+<text x="830" y="64" class="lbl">view_as_real</text>
+<text x="806" y="84" class="mono">(4, 2048, T) REAL</text>
+<text x="806" y="100" class="tiny">2 stereo × 2 (re, im) = 4</text>
+<text x="806" y="114" class="tiny">no complex numbers remain</text>
+
+<rect x="22" y="140" width="956" height="92" fill="#fff" stroke="#bbb" rx="6"/>
+<text x="38" y="164" class="cap">WHY EACH SETTING MATTERS</text>
+<text x="38" y="186" class="tiny">n_fft 4096 → fine PITCH resolution (~10.8 Hz) but blurry TIMING (93 ms). This trade is a law, not a limitation — which is precisely why Demucs also keeps a raw-waveform branch with perfect timing to cover the blind spot.</text>
+<text x="38" y="206" class="tiny">hop 1024 → a new frame every 23 ms, so frames overlap 75%. Overlap is required because the Hann window fades to zero at its edges; without it, audio near frame boundaries would be under-counted and reconstruction would fail.</text>
+<text x="38" y="226" class="tiny">center=True + reflect padding → frame k is centred on sample k×hop. Getting this wrong time-shifts everything by ~46 ms. onesided → a real signal's spectrum is mirrored, so half the bins are redundant.</text>
+</svg>
+
+<h2>Phase D — Inside the ONNX graph: encoding</h2>
+
+<svg viewBox="0 0 1000 400" xmlns="http://www.w3.org/2000/svg">
+<rect x="2" y="2" width="996" height="396" fill="#f4f8fb" stroke="#4a7ba7" stroke-width="2" rx="10"/>
+<text x="20" y="26" class="cap" fill="#4a7ba7">INSIDE THE GRAPH — ALL REAL-VALUED, ALL FROZEN, IDENTICAL FOR EVERY INPUT</text>
+
+<rect x="22" y="40" width="200" height="56" fill="#fff" stroke="#333" stroke-width="1.8" rx="6"/>
+<circle cx="40" cy="58" r="11" fill="#4a7ba7"/><text x="35" y="62" class="num">D1</text>
+<text x="58" y="62" class="lbl">Two inputs enter</text>
+<text x="34" y="82" class="mono">waveform (2, N) + spec (4, 2048, T)</text>
+
+<!-- spectral branch -->
+<text x="22" y="126" class="cap">SPECTRAL BRANCH — 2-D CONVOLUTIONS</text>
+<rect x="22" y="136" width="176" height="62" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="154" r="11" fill="#4a7ba7"/><text x="35" y="158" class="num">D2</text>
+<text x="58" y="158" class="lbl">enc 1 — 48 filters</text>
+<text x="34" y="176" class="mono">each (4, 3, 3) = 36 weights</text>
+<text x="34" y="190" class="mono">→ (48, 1024, T/2)</text>
+
+<path d="M202,167 L222,167" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+<rect x="228" y="136" width="176" height="62" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="246" cy="154" r="11" fill="#4a7ba7"/><text x="241" y="158" class="num">D3</text>
+<text x="264" y="158" class="lbl">enc 2 — 96 filters</text>
+<text x="240" y="176" class="mono">each (48, 3, 3)</text>
+<text x="240" y="190" class="mono">→ (96, 512, T/4)</text>
+
+<path d="M408,167 L428,167" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+<rect x="434" y="136" width="176" height="62" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="452" cy="154" r="11" fill="#4a7ba7"/><text x="447" y="158" class="num">D4</text>
+<text x="470" y="158" class="lbl">enc 3 — 192 filters</text>
+<text x="446" y="176" class="mono">each (96, 3, 3)</text>
+<text x="446" y="190" class="mono">→ (192, 256, T/8)</text>
+
+<path d="M614,167 L634,167" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+<rect x="640" y="136" width="176" height="62" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="658" cy="154" r="11" fill="#4a7ba7"/><text x="653" y="158" class="num">D5</text>
+<text x="676" y="158" class="lbl">enc 4 — 384 filters</text>
+<text x="652" y="176" class="mono">each (192, 3, 3)</text>
+<text x="652" y="190" class="mono">→ (384, 128, T/16)</text>
+
+<rect x="828" y="136" width="150" height="62" fill="#fff" stroke="#c0842b" stroke-width="2" rx="6"/>
+<circle cx="846" cy="154" r="11" fill="#c0842b"/><text x="841" y="158" class="num">D6</text>
+<text x="864" y="158" class="lbl">GELU after each</text>
+<text x="842" y="178" class="tiny">without a nonlinearity,</text>
+<text x="842" y="192" class="tiny">stacked convs collapse to one</text>
+
+<!-- temporal -->
+<text x="22" y="232" class="cap">TEMPORAL BRANCH — 1-D CONVOLUTIONS ON THE RAW WAVEFORM</text>
+<rect x="22" y="242" width="380" height="52" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="260" r="11" fill="#4a7ba7"/><text x="35" y="264" class="num">D7</text>
+<text x="58" y="264" class="lbl">Same 48 → 96 → 192 → 384 progression</text>
+<text x="34" y="284" class="tiny">perfect timing, no explicit pitch — the mirror image of the spectral branch's strengths</text>
+
+<rect x="416" y="242" width="270" height="52" fill="#fff" stroke="#2e7d5b" stroke-width="2" rx="6"/>
+<circle cx="434" cy="260" r="11" fill="#2e7d5b"/><text x="429" y="264" class="num">D8</text>
+<text x="452" y="264" class="lbl">Skip connections saved</text>
+<text x="430" y="284" class="tiny">each level's output copied aside for the decoder</text>
+
+<rect x="700" y="242" width="278" height="52" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="718" cy="260" r="11" fill="#4a7ba7"/><text x="713" y="264" class="num">D9</text>
+<text x="736" y="264" class="lbl">Receptive field grows</text>
+<text x="714" y="284" class="tiny">3 → 7 → 15 → 31 cells (~70 ms → ~720 ms of audio)</text>
+
+<rect x="22" y="314" width="956" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<text x="38" y="338" class="cap">THE TRADE BEING MADE HERE</text>
+<text x="38" y="358" class="tiny">The grid SHRINKS while the channel stack DEEPENS. Halving both dimensions leaves a quarter of the cells, so doubling the channels keeps work per layer roughly constant.</text>
+<text x="38" y="376" class="tiny">You are converting "WHERE in the audio something happened" into "WHAT KIND of thing it is" — gaining meaning, losing precision. The skips (D8) exist to hand that lost precision back later.</text>
+</svg>
+
+<h2>Phase E — Inside the ONNX graph: the transformer (bottleneck)</h2>
+
+<svg viewBox="0 0 1000 300" xmlns="http://www.w3.org/2000/svg">
+<rect x="2" y="2" width="996" height="296" fill="#f4f8fb" stroke="#4a7ba7" stroke-width="2" rx="10"/>
+<text x="20" y="26" class="cap" fill="#4a7ba7">WHERE EVERY MOMENT GETS TO CONSULT EVERY OTHER MOMENT</text>
+
+<rect x="22" y="40" width="228" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="58" r="11" fill="#4a7ba7"/><text x="35" y="62" class="num">E1</text>
+<text x="58" y="62" class="lbl">Q, K, V computed</text>
+<text x="34" y="82" class="tiny">each position × three learned matrices</text>
+<text x="34" y="98" class="tiny">Query = what I seek · Key = what I offer</text>
+<text x="34" y="110" class="tiny">Value = what I hand over if chosen</text>
+
+<path d="M254,75 L278,75" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="284" y="40" width="212" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="302" cy="58" r="11" fill="#4a7ba7"/><text x="297" y="62" class="num">E2</text>
+<text x="320" y="62" class="lbl">Scores = Q · K</text>
+<text x="296" y="82" class="tiny">dot product = similarity</text>
+<text x="296" y="98" class="tiny">every position against every other</text>
+<text x="296" y="110" class="mono">scaled by 1/√d for stability</text>
+
+<path d="M500,75 L524,75" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="530" y="40" width="212" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="548" cy="58" r="11" fill="#4a7ba7"/><text x="543" y="62" class="num">E3</text>
+<text x="566" y="62" class="lbl">Softmax → weights</text>
+<text x="542" y="82" class="tiny">all positive, summing to exactly 1</text>
+<text x="542" y="100" class="tiny">"how much of my new self comes</text>
+<text x="542" y="112" class="tiny">from each other position"</text>
+
+<path d="M746,75 L770,75" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="776" y="40" width="202" height="70" fill="#fff" stroke="#333" stroke-width="1.8" rx="6"/>
+<circle cx="794" cy="58" r="11" fill="#4a7ba7"/><text x="789" y="62" class="num">E4</text>
+<text x="812" y="62" class="lbl">Weighted sum of V</text>
+<text x="788" y="82" class="tiny">new vector per position, now</text>
+<text x="788" y="98" class="tiny">containing context from the</text>
+<text x="788" y="112" class="tiny">whole chunk</text>
+
+<rect x="22" y="132" width="308" height="66" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="150" r="11" fill="#4a7ba7"/><text x="35" y="154" class="num">E5</text>
+<text x="58" y="154" class="lbl">Multi-head</text>
+<text x="34" y="174" class="tiny">the whole process runs several times in parallel with</text>
+<text x="34" y="190" class="tiny">different matrices — one head may track rhythm, another harmony</text>
+
+<rect x="346" y="132" width="322" height="66" fill="#fff" stroke="#2e7d5b" stroke-width="2" rx="6"/>
+<circle cx="364" cy="150" r="11" fill="#2e7d5b"/><text x="359" y="154" class="num">E6</text>
+<text x="382" y="154" class="lbl">Self-attention AND cross-attention</text>
+<text x="358" y="174" class="tiny">self: within one branch. cross: Q from one branch, K/V from</text>
+<text x="358" y="190" class="tiny">the other — this is how waveform and spectrogram views merge</text>
+
+<rect x="684" y="132" width="294" height="66" fill="#fff" stroke="#c0842b" stroke-width="2" rx="6"/>
+<circle cx="702" cy="150" r="11" fill="#c0842b"/><text x="697" y="154" class="num">E7</text>
+<text x="720" y="154" class="lbl">Why it sits HERE</text>
+<text x="696" y="174" class="tiny">cost grows with the SQUARE of sequence length, so it runs</text>
+<text x="696" y="190" class="tiny">only after the encoder has shrunk the time axis</text>
+
+<rect x="22" y="216" width="956" height="66" fill="#fff" stroke="#bbb" rx="6"/>
+<text x="38" y="240" class="cap">WHAT PROBLEM THIS SOLVES</text>
+<text x="38" y="260" class="tiny">A 3×3 convolution only ever sees a tiny neighbourhood. To decide whether a sound at second 47 is a vocal, it helps to compare against second 12 — but a conv can only reach that far by stacking dozens of layers.</text>
+<text x="38" y="276" class="tiny">Attention lets every position consult every other position in ONE step. That is the long-range musical context (repeated choruses, consistent vocal timbre) that pure convolution cannot see.</text>
+</svg>
+
+<h2>Phase F — Inside the ONNX graph: decoding</h2>
+
+<svg viewBox="0 0 1000 290" xmlns="http://www.w3.org/2000/svg">
+<rect x="2" y="2" width="996" height="286" fill="#f4f8fb" stroke="#4a7ba7" stroke-width="2" rx="10"/>
+<text x="20" y="26" class="cap" fill="#4a7ba7">REBUILDING FULL RESOLUTION — THE ENCODER RUN BACKWARDS</text>
+
+<rect x="22" y="40" width="232" height="72" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="58" r="11" fill="#4a7ba7"/><text x="35" y="62" class="num">F1</text>
+<text x="58" y="62" class="lbl">Transposed convolution</text>
+<text x="34" y="82" class="tiny">the reverse mapping: ONE input number</text>
+<text x="34" y="98" class="tiny">is stamped onto MANY output cells,</text>
+<text x="34" y="110" class="tiny">overlapping stamps summed</text>
+
+<path d="M258,76 L282,76" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="288" y="40" width="232" height="72" fill="#fff" stroke="#2e7d5b" stroke-width="2" rx="6"/>
+<circle cx="306" cy="58" r="11" fill="#2e7d5b"/><text x="301" y="62" class="num">F2</text>
+<text x="324" y="62" class="lbl">Skip connections concatenated</text>
+<text x="300" y="82" class="tiny">encoder level's output arrives and is stacked on</text>
+<text x="300" y="98" class="tiny">as extra channels (96 upsampled + 96 skip = 192)</text>
+<text x="300" y="110" class="tiny">"what it is" + "exactly where it was"</text>
+
+<path d="M524,76 L548,76" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="554" y="40" width="212" height="72" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="572" cy="58" r="11" fill="#4a7ba7"/><text x="567" y="62" class="num">F3</text>
+<text x="590" y="62" class="lbl">Channels shrink as grid grows</text>
+<text x="568" y="82" class="mono">384 → 192 → 96 → 48</text>
+<text x="568" y="100" class="tiny">the encoder's trade, reversed</text>
+
+<path d="M770,76 L794,76" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="800" y="40" width="178" height="72" fill="#fff" stroke="#333" stroke-width="1.8" rx="6"/>
+<circle cx="818" cy="58" r="11" fill="#4a7ba7"/><text x="813" y="62" class="num">F4</text>
+<text x="836" y="62" class="lbl">Spectral output</text>
+<text x="812" y="82" class="tiny">per stem: 4 planes</text>
+<text x="812" y="98" class="tiny">(2 stereo × re/im)</text>
+<text x="812" y="112" class="tiny">at full resolution</text>
+
+<rect x="22" y="132" width="466" height="62" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="150" r="11" fill="#4a7ba7"/><text x="35" y="154" class="num">F5</text>
+<text x="58" y="154" class="lbl">Temporal decoder runs in parallel</text>
+<text x="34" y="174" class="tiny">mirrors the spectral decoder, emitting waveform directly:</text>
+<text x="34" y="188" class="mono">(4 stems × 2 channels, samples)</text>
+
+<rect x="504" y="132" width="474" height="62" fill="#fff" stroke="#c0842b" stroke-width="2" rx="6"/>
+<circle cx="522" cy="150" r="11" fill="#c0842b"/><text x="517" y="154" class="num">F6</text>
+<text x="540" y="154" class="lbl">◀ THE ONNX GRAPH ENDS HERE ▶</text>
+<text x="516" y="174" class="tiny">Both outputs leave the graph as plain real-valued arrays. Everything after this</text>
+<text x="516" y="188" class="tiny">point is NumPy again — which is exactly where the complex numbers return.</text>
+
+<rect x="22" y="212" width="956" height="62" fill="#fff" stroke="#bbb" rx="6"/>
+<text x="38" y="236" class="cap">WHY SKIPS ARE NOT OPTIONAL</text>
+<text x="38" y="256" class="tiny">Downsampling deliberately destroyed spatial precision. Upsampling cannot invent it back — without skips the output is smeared and watery, with soft, indistinct transients.</text>
+<text x="38" y="270" class="tiny">The skip route carries the original fine detail around the bottleneck, so the decoder receives both the abstract meaning and the exact timing. Both paths are required.</text>
+</svg>
+
+<h2>Phase G — Postprocessing in NumPy, and output</h2>
+
+<svg viewBox="0 0 1000 320" xmlns="http://www.w3.org/2000/svg">
+<rect x="2" y="2" width="996" height="316" fill="#fdf7f2" stroke="#c0842b" stroke-width="2" stroke-dasharray="7 5" rx="10"/>
+<text x="20" y="26" class="cap" fill="#c0842b">BACK OUTSIDE THE GRAPH — COMPLEX NUMBERS RETURN</text>
+
+<rect x="22" y="40" width="222" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="58" r="11" fill="#c0842b"/><text x="35" y="62" class="num">G1</text>
+<text x="58" y="62" class="lbl">Re-pair into complex</text>
+<text x="34" y="82" class="tiny">the 4 real planes per stem become</text>
+<text x="34" y="98" class="mono">(2, 2048, T) complex</text>
+
+<path d="M248,75 L272,75" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="278" y="40" width="242" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="296" cy="58" r="11" fill="#c0842b"/><text x="291" y="62" class="num">G2</text>
+<text x="314" y="62" class="lbl">ISTFT per stem</text>
+<text x="290" y="82" class="tiny">inverse FFT each frame → window →</text>
+<text x="290" y="98" class="tiny">overlap-add → divide by summed window energy</text>
+
+<path d="M524,75 L548,75" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="554" y="40" width="212" height="70" fill="#fff" stroke="#333" stroke-width="1.8" rx="6"/>
+<circle cx="572" cy="58" r="11" fill="#c0842b"/><text x="567" y="62" class="num">G3</text>
+<text x="590" y="62" class="lbl">Sum the two branches</text>
+<text x="568" y="82" class="mono">ISTFT(spectral) + temporal</text>
+<text x="568" y="98" class="tiny">= this stem's audio for this chunk</text>
+
+<path d="M770,75 L794,75" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+
+<rect x="800" y="40" width="178" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="818" cy="58" r="11" fill="#c0842b"/><text x="813" y="62" class="num">G4</text>
+<text x="836" y="62" class="lbl">Overlap-add chunk</text>
+<text x="812" y="82" class="tiny">cross-faded into the running</text>
+<text x="812" y="98" class="tiny">full-length output</text>
+
+<rect x="22" y="128" width="466" height="52" fill="#fff" stroke="#2e7d5b" stroke-width="2" rx="6"/>
+<circle cx="40" cy="146" r="11" fill="#2e7d5b"/><text x="35" y="150" class="num">G5</text>
+<text x="58" y="150" class="lbl">Repeat C1–G4 for every chunk</text>
+<text x="34" y="170" class="tiny">a 4:55 song ≈ 44 s total on CPU (~0.15× real-time)</text>
+
+<rect x="504" y="128" width="474" height="52" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="522" cy="146" r="11" fill="#c0842b"/><text x="517" y="150" class="num">G6</text>
+<text x="540" y="150" class="lbl">Chained Full mode loops back</text>
+<text x="516" y="170" class="tiny">Bandit's "music" stem re-enters at C1 and runs the whole Demucs path again</text>
+
+<text x="22" y="208" class="cap">OUTPUT</text>
+
+<rect x="22" y="218" width="222" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="40" cy="236" r="11" fill="#2e7d5b"/><text x="35" y="240" class="num">H1</text>
+<text x="58" y="240" class="lbl">Encode</text>
+<text x="34" y="260" class="tiny">WAV for download,</text>
+<text x="34" y="276" class="tiny">MP3 preview for the browser</text>
+
+<path d="M248,253 L272,253" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+<rect x="278" y="218" width="222" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="296" cy="236" r="11" fill="#2e7d5b"/><text x="291" y="240" class="num">H2</text>
+<text x="314" y="240" class="lbl">Recorded in SQLite</text>
+<text x="290" y="260" class="tiny">stems registered, job marked</text>
+<text x="290" y="276" class="mono">done</text>
+
+<path d="M504,253 L528,253" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+<rect x="534" y="218" width="222" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="552" cy="236" r="11" fill="#2e7d5b"/><text x="547" y="240" class="num">H3</text>
+<text x="570" y="240" class="lbl">Frontend renders</text>
+<text x="546" y="260" class="tiny">polling sees "done" → wavesurfer</text>
+<text x="546" y="276" class="tiny">multitrack player, mute/solo/volume</text>
+
+<path d="M760,253 L784,253" stroke="#666" stroke-width="1.4" marker-end="url(#ar)"/>
+<rect x="790" y="218" width="188" height="70" fill="#fff" stroke="#bbb" rx="6"/>
+<circle cx="808" cy="236" r="11" fill="#2e7d5b"/><text x="803" y="240" class="num">H4</text>
+<text x="826" y="240" class="lbl">TTL janitor</text>
+<text x="802" y="260" class="tiny">source + stems auto-deleted</text>
+<text x="802" y="276" class="tiny">after the retention window</text>
+</svg>
+
+<div class="note"><strong>Notice the symmetry:</strong> C4 turned complex into 4 real planes on the way in; G1 turns 4 real planes back into complex on the way out. C2's STFT is undone by G2's ISTFT. The ONNX graph sits exactly between those two mirrored pairs — which is the entire reason the split works.</div>
+
+<h2>The same pipeline, explained at three depths</h2>
+
+<h3>For a 5th grader</h3>
+<p style="font-size:14px">Imagine a band playing in a room — a singer, a drummer, a bass player, a guitarist — and you record all of it with <strong>one</strong> microphone. Everything gets mixed together into a single sound, like fruit blended into a smoothie. Once it's blended, you can't just pick the strawberries back out. Our program un-blends the smoothie.</p>
+<p style="font-size:14px">You give it a song — a file from your computer, or a link from YouTube or TikTok. The program goes and gets the song, then tidies it up so every song looks the same to it no matter where it came from. Then it hands the song to a kind of robot that has listened to <em>millions</em> of songs. Nobody ever told this robot what a singer sounds like; it practiced over and over, guessing and being corrected, until it got really good at hearing which sounds are the voice and which are the drums.</p>
+<p style="font-size:14px">The robot is big and slow, so we don't give it the whole song at once. We cut the song into pieces about 8 seconds long, let the robot work on one piece at a time, then glue the pieces back together — carefully overlapping the edges so you can't hear where the cuts were. One more thing: the robot arrived in a giant heavy toolbox we didn't want to carry around, so we unpacked it and put just the important part into a small light box. Now it runs fast on a normal computer.</p>
+<p style="font-size:14px">When it's done, the website shows a squiggly line for each part of the song. You can press play, turn the singer off to make karaoke, or download any piece. A five-minute song takes about 45 seconds.</p>
+
+<h3>For a high schooler</h3>
+<p style="font-size:14px">Sound is a wave — air pressure wiggling up and down — stored as <strong>44,100 numbers per second</strong> per ear. There's a second way to look at it: turn it into a <strong>picture</strong>. Chop the audio into tiny overlapping slices and, for each slice, work out which pitches are present and how loud. Stack those slices and you get a spectrogram: time across, pitch up, brightness = loudness. A held note is a horizontal line; a drum hit is a vertical stripe.</p>
+<p style="font-size:14px">That matters because <strong>neural networks are very good at finding patterns in pictures</strong>. The model we use (Demucs, from Meta) looks at <em>both</em> the picture and the raw wave, because they have opposite strengths — the picture tells you <em>what instrument</em> it is, the wave tells you <em>exactly when</em> things happen. A part called a transformer lets the two views compare notes. It learned by being shown millions of examples where the true separated tracks were known, and corrected every time it guessed wrong. Nobody wrote rules describing a voice.</p>
+<p style="font-size:14px">The engineering problem: the model ships inside a huge research toolkit called PyTorch — great for scientists, far too heavy for a website. So we converted it to <strong>ONNX</strong>, a lightweight portable format. That failed at first, because the picture-making math uses <strong>complex numbers</strong> (a way of storing two facts about each pitch at once) and ONNX has no way to store those. The fix: cut the model in half — the picture-making stayed outside in ordinary code, and only the neural network core got converted. Then we checked both versions on the same song and confirmed they gave essentially identical answers.</p>
+<p style="font-size:14px">The whole app: you submit a file or link &rarr; the server downloads and converts it to one standard format &rarr; checks whether it has already separated this exact song (if so, instant answer) &rarr; chops the audio into ~8-second chunks &rarr; each chunk becomes a picture &rarr; through the network &rarr; back into sound &rarr; glued together with overlapping edges &rarr; saved as audio files &rarr; and the website shows each part with its own waveform, play button and mute switch.</p>
+
+<h3>For a college student</h3>
+<p style="font-size:14px"><strong>Build time (once, offline).</strong> Demucs ships as two artifacts: a checkpoint (a state dict of ~40M float32 parameters) and the architecture as PyTorch <code>nn.Module</code> code. Neither is usable alone — the checkpoint has no topology, the code has no learned values. You instantiate the model, load the weights, then refactor to isolate the STFT/ISTFT at its boundaries, verifying the refactored forward pass reproduces the original at <strong>exactly 0.0</strong> difference before touching the exporter.</p>
+<p style="font-size:14px">Export proceeds by <strong>tracing</strong>: run one forward pass on a correctly-shaped dummy input; every tensor op is recorded and translated into the ONNX opset; Python control flow evaporates (loops unroll, conditionals collapse to whichever branch executed). Two things blocked a naive export — ONNX has <strong>no complex tensor dtype</strong>, so <code>torch.stft</code> had no translation, and <strong>data-dependent asserts</strong> cannot be expressed in a static graph. Both live only at the model's edges, because Demucs immediately converts its complex spectrogram to real/imaginary channels — the core is already real-valued. Hence the split. The result is a 166 MB self-describing graph, verified against the PyTorch oracle at <strong>max abs diff &asymp; 2e-4 (&asymp; &minus;74 dBFS)</strong>, well under the LSB of 16-bit audio. Dynamic int8 quantization (166&rarr;56 MB) was implemented but shelved: measurable quality degradation on a transformer-heavy model, and no speedup on ARM since the int8 gains depend on x86 VNNI.</p>
+<p style="font-size:14px"><strong>Runtime ingest.</strong> <code>POST /jobs</code> writes a SQLite job row and returns immediately. An asyncio pool capped at <code>POOL_SIZE</code> dispatches to an isolated subprocess (bounded peak RSS, hard timeout, killable, model loaded once per worker). URL ingestion runs <code>yt-dlp</code> sandboxed with host allow-listing and duration/size caps; <code>ffmpeg</code> normalizes to 44.1 kHz stereo float32. A content hash keys a dedup cache; the router then selects separators by mode and tier.</p>
+<p style="font-size:14px"><strong>Preprocessing (NumPy).</strong> Chunk to ~7.8 s — the training segment length — with <strong>real surrounding context</strong> at boundaries rather than zero-padding (zero-padding presents an out-of-distribution discontinuity; this was a genuine bug caught by the oracle diff). STFT with <code>n_fft=4096</code>, <code>hop=1024</code> (75% overlap), Hann window, <code>center=True</code> with reflect padding, one-sided &rarr; <code>(2, 2049, T)</code> complex &rarr; drop Nyquist &rarr; <code>view_as_real</code> &rarr; <code>(4, 2048, T)</code> real, where 4 = 2 stereo &times; {Re, Im}.</p>
+<p style="font-size:14px"><strong>Encoder.</strong> Spectral branch: 2-D convolutions with kernels of shape <code>(C_in, 3, 3)</code>, channels 48&rarr;96&rarr;192&rarr;384, strided downsampling; GELU between layers (without a nonlinearity, stacked affine maps collapse to a single affine map). Temporal branch: 1-D convolutions on the raw waveform, same channel progression. Skips retained at each resolution. Effective receptive field grows ~3&rarr;7&rarr;15&rarr;31 cells as the grid shrinks — trading spatial precision for semantic abstraction.</p>
+<p style="font-size:14px"><strong>Bottleneck.</strong> A cross-domain transformer: learned Q/K/V projections, scaled dot-product attention (<code>softmax(QK&#7488;/&radic;d)V</code>), multi-head, with <strong>self-attention within</strong> each branch and <strong>cross-attention between</strong> them, fusing time-domain and frequency-domain representations. Placed post-downsampling because attention is quadratic in sequence length.</p>
+<p style="font-size:14px"><strong>Decoder.</strong> Transposed convolutions upsample while channels contract 384&rarr;192&rarr;96&rarr;48, with encoder skips <strong>concatenated</strong> at matching resolutions — the U-Net pattern that restores the high-frequency spatial detail the bottleneck discarded. Outputs, per source: a spectral tensor (4 planes = 2 stereo &times; Re/Im) plus a direct temporal waveform. The graph terminates here.</p>
+<p style="font-size:14px"><strong>Postprocessing (NumPy).</strong> Re-pair Re/Im into complex, ISTFT (inverse FFT per frame, window, overlap-add, normalize by summed window energy for NOLA compliance), sum the ISTFT'd spectral output with the temporal output per source, then overlap-add the chunk into the full-length buffer with cross-faded seams. Note the symmetry: C4&harr;G1 and C2&harr;G2 are exact inverses, and the ONNX graph sits precisely between those mirrored pairs.</p>
+<p style="font-size:14px"><strong>Modes &amp; serving.</strong> Music &rarr; Demucs. Video &rarr; Bandit (a band-split cinematic model: speech/music/effects). Full &rarr; chained, with Bandit's music bus recirculated through the entire Demucs path, yielding dialogue + sung vocals + instruments from a single clip. Stems are encoded as WAV (download) and MP3 (browser preview — full WAVs exhaust Web Audio memory), registered in SQLite, and a TTL sweeper purges source and stems. Measured throughput &asymp; <strong>0.15&times; real-time</strong> — a 4:55 track in ~44 s, CPU-only.</p>
+
+<h2>Next steps to implement</h2>
+
+<p style="font-size:14px">Detail and rationale for the first two live in <code>StemSep_PRD_Addendum.md</code>; the rest are carried over from the original PRD and from decisions deferred during Phases 1–5.</p>
+
+<h3>1. Instrument separation (the headline ask)</h3>
+<ul>
+<li><strong>Quick win — <code>htdemucs_6s</code>:</strong> adds <em>guitar</em> and <em>piano</em> to the existing four stems. Nearly free: same architecture, same export path (A1–A10), same runner. Ship this first, and the oracle test verifies the new export automatically.</li>
+<li><strong>The right answer — Banquet (query-based):</strong> a stem-agnostic single-decoder model where you <em>name</em> the instrument you want. Comes from the same repo already integrated for Bandit, is only ~24.9M parameters (ideal for CPU), beats <code>htdemucs_6s</code> on guitar and piano, and reaches narrow classes like clean acoustic guitar, reeds and organ.</li>
+<li><strong>Instrument detection (PaSST):</strong> auto-detect which instruments a track contains so the UI can offer them, rather than making the user guess.</li>
+<li><strong>Stretch — AudioSep:</strong> free-text queries ("separate the solo violin"). Broader coverage, lower musical fidelity — an experimental mode, not the default.</li>
+<li class="warn" style="list-style:none;margin-left:-20px"><strong>Honest caveat:</strong> orchestral/symphonic separation is an open research problem — the field is still building datasets for it (SynthSOD, Spheres). Pop/rock instruments will work well; a dense symphony will be rough. Say this to Jack before investing heavily.</li>
+</ul>
+
+<h3>2. UI overhaul</h3>
+<ul>
+<li><strong>Progress &amp; timing (priority):</strong> live elapsed timer; a <em>true</em> progress bar during separation derived from <strong>chunks completed / total chunks</strong> (the chunk loop already knows the exact fraction — never ship a fake spinner); an <strong>ETA shown before work starts</strong> from the tier's measured real-time factor (~0.15× real-time → a 4:55 song ≈ 45 s); per-stage timings (download/decode/separate/encode); a final "took 44 s" summary; an explicit "returned instantly from cache" state; and weighted progress across both passes in chained Full mode. Requires the runner to report chunk completion back to the job row.</li>
+<li><strong>Transport:</strong> skip ±10s / ±30s, jump to start/end, click-to-seek, timeline ruler, current-time readout, keyboard shortcuts (space, arrows, M, S), playback speed 0.5–2×, A/B loop region.</li>
+<li><strong>Per-stem:</strong> colour-coded waveforms, volume + pan, live VU meters, waveform zoom + minimap, spectrogram toggle, collapse/reorder/rename.</li>
+<li><strong>Mixing &amp; comparison:</strong> master volume, mute-all/reset, A/B against the original, save a mix preset, export a custom mix.</li>
+<li><strong>Workflow:</strong> recent jobs list, re-run same audio at a different mode/tier without re-uploading, job metadata panel, shareable result link.</li>
+<li><strong>Polish &amp; performance:</strong> dark theme + design system, loading skeletons, server-side precomputed waveform peaks for long files, responsive layout, accessible transport controls.</li>
+</ul>
+
+<h3>3. Carried over / previously deferred</h3>
+<ul>
+<li><strong>SDR eval harness</strong> — the biggest gap. Quality claims are currently qualitative. Needs ground-truth stems (a MUSDB18-HQ test track) to measure per-tier and per-model quality properly.</li>
+<li><strong>Revisit int8 quantization</strong> — currently shelved (quality loss on this transformer, no ARM speedup). Worth retrying with static or per-stem quantization once the eval harness can measure the damage numerically.</li>
+<li><strong>Stem-specific sub-models</strong> — a vocals-only export costs roughly ¼ of the full 4-stem bag. Big win when the user only wants one stem.</li>
+<li><strong>Reproducibility manifest per job</strong> — record model version, mode, tier, parameters, content hash and timings so any output is auditable and repeatable. (This is the provenance-receipt instinct applied here; see question 2.)</li>
+<li><strong>README + architecture doc</strong> — the repo still has uv's placeholder README. Write it before sharing the repo.</li>
+<li><strong>Push to GitHub</strong> — private first; confirm with Jack whether it belongs in a Cipher org.</li>
+<li><strong>Auto-mode detection</strong> — a light classifier ("is there speech here?") to pick Music vs Video mode automatically.</li>
+<li><strong>Deployment</strong> — Docker + a real queue (Redis/RQ) only if this needs to leave your machine; currently an in-process capped pool, no containers.</li>
+<li><strong>Bandit optimization</strong> — if it landed on the PyTorch fallback, export it to ONNX like Demucs so the whole production path is uniform.</li>
+<li><strong>Dynamic axes</strong> — currently sidestepped by fixed 7.8s chunks; revisit only if variable input shapes are ever needed.</li>
+</ul>
+
+<h2>Questions for Jack</h2>
+<p style="font-size:14px">Full list and context in <code>StemSep_PRD_Addendum.md §3</code>. The architecture questions deliberately follow the threads he responded to in provenance.fm.</p>
+
+<table>
+<tr><th style="width:170px">Area</th><th>Question</th></tr>
+<tr><td><strong>Architecture</strong></td><td><strong>1.</strong> Should adding a separator be a true drop-in plugin (registry + config, zero changes elsewhere), or is the current explicit router the right level for now?</td></tr>
+<tr><td></td><td><strong>2.</strong> Do you want a per-job <strong>reproducibility manifest</strong> — model version, tier, params, content hash, timings — so every result is auditable and repeatable?</td></tr>
+<tr><td></td><td><strong>3.</strong> Should the <code>CLAUDE.md</code> "Things NOT to do" guardrails be maintained as a standing artifact, and is there a Cipher house style to fold in?</td></tr>
+<tr><td><strong>Deployment</strong></td><td><strong>4.</strong> Where does this run — my machine, a Cipher box, containerized? Decides Docker + a real queue vs. the current in-process pool.</td></tr>
+<tr><td></td><td><strong>5.</strong> Concurrency and hardware target (cores/RAM, simultaneous jobs) so I can size <code>POOL_SIZE</code> and set tier defaults from measurements?</td></tr>
+<tr><td></td><td><strong>6.</strong> Is CPU-only permanent or a v1 constraint? Changes whether I invest further in quantization tuning or keep a GPU path open.</td></tr>
+<tr><td><strong>Product</strong></td><td><strong>7.</strong> Who's the user — internal Cipher team, artists, labels? Determines API-first vs. polished UI.</td></tr>
+<tr><td></td><td><strong>8.</strong> What's driving instrument separation — sampling/remix, catalog analysis, rights work, A&amp;R? The use case determines which instruments matter.</td></tr>
+<tr><td></td><td><strong>9.</strong> Fixed taxonomy (guitar/piano/strings/brass/reeds) or arbitrary free-text query ("solo violin")? A real architectural fork: Banquet vs. AudioSep.</td></tr>
+<tr><td></td><td><strong>10.</strong> How central is orchestral/classical? It's the hardest case and current models are weak there — I'd rather set expectations than over-invest.</td></tr>
+<tr><td></td><td><strong>11.</strong> Quality bar — a golden set or target SDR, or is "sounds right to an A&amp;R ear" enough for now?</td></tr>
+<tr><td><strong>Scope</strong></td><td><strong>12.</strong> Retention/legal posture — internal tooling on authorized content only, or user-facing? Sets TTL, storage, and what we keep.</td></tr>
+<tr><td></td><td><strong>13.</strong> Integrate with existing Cipher infra (auth, storage, queue), or stand alone? And should the repo live in a Cipher org?</td></tr>
+<tr><td></td><td><strong>14.</strong> What does "done" look like for this intro task — a demo you walk through, or something deployable?</td></tr>
+</table>
+
+<div class="note" style="margin-top:24px"><strong>Suggested sequencing:</strong> ask Jack §8–10 first (they shape the instrument work directly) → ship <code>htdemucs_6s</code> as the quick win → do the UI overhaul (biggest perceived-quality jump, makes everything demoable) → Banquet query-based separation → eval harness throughout so claims stay measured rather than asserted.</div>

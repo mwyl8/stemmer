@@ -109,7 +109,7 @@ stemmer/
 ## 4. API (v1)
 
 - `POST /jobs` — file upload **or** `{url, mode, tier}`. Returns `{job_id}`. Validates size/duration/URL; dedups via content hash.
-- `GET /jobs/{id}` — `{status, stage, progress, stems?}`, `stage ∈ {queued, downloading, decoding, separating, encoding, done, error}`.
+- `GET /jobs/{id}` — `{status, stage, progress_pct (integer 0-100), stems?, submitted_at, stage_started_at, elapsed_seconds, eta_seconds, chunks_done, chunks_total, stage_timings, from_cache}`, `stage ∈ {queued, downloading, decoding, separating, encoding, done, error}`. The worker updates `chunks_done` as each chunk finishes so `progress_pct` and `eta_seconds` are real, not simulated.
 - `GET /jobs/{id}/stems` — list of `{name, url, format, duration}`.
 - `GET /jobs/{id}/stems/{name}` — stream/download a stem (mp3 preview or wav).
 - `GET /jobs/{id}/download` — zip of all stems.
@@ -148,7 +148,13 @@ POOL_SIZE = N   # max concurrent separations (decision 9)
 ## 6. Frontend requirements (v1)
 
 - **Submit**: drag-drop file **or** paste link; pick **mode** (Music/Video/Full) and **tier** (Fast/Balanced/Best).
-- **Progress**: staged bar (download → decode → separate → encode) with % where available.
+- **Progress & timing (required)**: a staged bar (download → decode → separate → encode) plus:
+  - a **live elapsed timer** counting up from submission;
+  - a **true progress %** during separation, derived from **chunks completed / total chunks** (the pipeline already processes fixed ~7.8 s chunks, so this is real progress, not a spinner);
+  - an **ETA shown before work begins**, computed from the measured real-time factor for the selected tier (e.g. ~0.15× real-time → a 4:55 song ≈ 45 s), refined as chunks complete;
+  - **per-stage timings** so a slow download is visibly distinct from slow separation;
+  - a **"took 44 s" summary** on the result page, and an explicit **"cached — returned instantly"** state on a cache hit.
+  - In chained **Full** mode there are two separation passes (Bandit, then Demucs on the music bus) — progress must be weighted across both, not reset to 0% halfway.
 - **Result — multitrack player** (`wavesurfer.js` + multitrack plugin): one synced transport; per-stem **waveform**, **mute / solo / volume**, seek, loop region.
 - **Karaoke toggle** (one-click mute vocal/speech stem).
 - **Download**: per-stem (**wav** + **mp3**) and **"download all" zip**.
@@ -232,6 +238,7 @@ Phases 1–3 are the first working slice (file/link → stems via API). CPU opti
 - Runs **CPU-only via quantized ONNX**; a 4-min song completes within the agreed target on the reference machine, numbers recorded per tier.
 - **Worker pool** runs up to **N** concurrent jobs without blocking the API.
 - **Multitrack player** with per-stem waveform + **mute/solo/volume**; **download** per-stem (wav+mp3) and zip.
+- **Progress UI** shows a live elapsed timer, a chunk-derived progress bar, an ETA before work starts, per-stage timings, and a final elapsed summary; cache hits are labelled as such.
 - **Content-hash cache** returns instantly on a repeat submission.
 - Source/stems **auto-purge** on TTL; no private-content fetching.
 - `test_router` + `test_ingest` green; **eval harness** reports per-tier SDR + latency.

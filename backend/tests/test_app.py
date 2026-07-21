@@ -15,6 +15,7 @@ import pytest
 import soundfile as sf
 from fastapi.testclient import TestClient
 
+from backend import jobs
 from backend import pool as pool_mod
 from backend.app import app
 from backend.ingest import fetch as fetch_mod
@@ -23,7 +24,7 @@ SR = 44100
 
 
 def _fake_separate_factory(data, sr=SR):
-    def _fake(input_wav, output_dir, mode="music", tier="balanced", timeout=300):
+    def _fake(input_wav, output_dir, mode="music", tier="balanced", stem_count=4, timeout=300, job_id=None):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         out = {}
@@ -31,6 +32,10 @@ def _fake_separate_factory(data, sr=SR):
             p = output_dir / f"{name}.wav"
             sf.write(p, data * 0.5, sr)
             out[name] = p
+        if job_id is not None:
+            from backend import jobs as jobs_mod
+
+            jobs_mod.update_progress(job_id, chunks_done=1, chunks_total=1)
         return out
 
     return _fake
@@ -256,3 +261,150 @@ def test_delete_job_purges_and_404s_on_repeat(client):
 
 def test_delete_unknown_job_404s(client):
     assert client.delete("/jobs/does-not-exist").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: live progress reporting (chunks_done/total, eta, from_cache).
+# These replace the `mocked_separator` fixture's fake with one that reports
+# chunk progress through jobs.update_progress() the same way the real child
+# subprocess does (runner.py's on_chunk callback), with small sleeps between
+# chunks so a polling loop actually observes multiple intermediate states.
+# ---------------------------------------------------------------------------
+
+
+def _write_fake_stems(output_dir, names, data, sr=SR):
+    out = {}
+    for name in names:
+        p = output_dir / f"{name}.wav"
+        sf.write(p, data * 0.5, sr)
+        out[name] = p
+    return out
+
+
+def test_progress_advances_monotonically_and_chunks_never_exceed_total(client, monkeypatch):
+    data = (0.05 * np.random.default_rng(20).standard_normal((SR, 2))).astype(np.float32)
+    total_chunks = 5
+
+    def _fake(input_wav, output_dir, mode="music", tier="balanced", stem_count=4, timeout=300, job_id=None):
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for done in range(total_chunks + 1):
+            if job_id is not None:
+                jobs.update_progress(job_id, chunks_done=done, chunks_total=total_chunks)
+            time.sleep(0.03)
+        return _write_fake_stems(output_dir, ("vocals", "drums", "bass", "other"), data)
+
+    monkeypatch.setattr(pool_mod.runner_mod, "separate_in_subprocess", _fake)
+
+    resp = client.post("/jobs", files={"file": ("song.wav", _upload_bytes(seed=20), "audio/wav")})
+    job_id = resp.json()["job_id"]
+
+    seen_progress = []
+    seen_chunks = []
+    deadline = time.time() + 5
+    status = None
+    while time.time() < deadline:
+        status = client.get(f"/jobs/{job_id}").json()
+        seen_progress.append(status["progress_pct"])
+        seen_chunks.append((status["chunks_done"], status["chunks_total"]))
+        if status["status"] in ("done", "error"):
+            break
+        time.sleep(0.01)
+
+    assert status is not None and status["status"] == "done"
+    assert seen_progress == sorted(seen_progress)  # never regresses
+    for pct in seen_progress:
+        assert isinstance(pct, int)
+        assert 0 <= pct <= 100
+    for done, total in seen_chunks:
+        if total:
+            assert done <= total  # chunks_done never exceeds chunks_total
+    assert seen_chunks[-1] == (total_chunks, total_chunks)
+    assert seen_progress[-1] == 100
+
+
+def test_chained_mode_progress_is_monotonic_across_both_passes(client, monkeypatch):
+    data = (0.05 * np.random.default_rng(21).standard_normal((SR, 2))).astype(np.float32)
+    bandit_total, demucs_total = 3, 2
+    grand_total = bandit_total + demucs_total
+
+    def _fake(input_wav, output_dir, mode="full", tier="balanced", stem_count=4, timeout=300, job_id=None):
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for done in range(bandit_total + 1):  # bandit pass: [0, bandit_total]
+            if job_id is not None:
+                jobs.update_progress(job_id, chunks_done=done, chunks_total=grand_total)
+            time.sleep(0.02)
+        for done in range(demucs_total + 1):  # demucs pass continues, doesn't reset to 0
+            if job_id is not None:
+                jobs.update_progress(job_id, chunks_done=bandit_total + done, chunks_total=grand_total)
+            time.sleep(0.02)
+        return _write_fake_stems(output_dir, ("speech", "vocals", "drums", "bass", "other"), data)
+
+    monkeypatch.setattr(pool_mod.runner_mod, "separate_in_subprocess", _fake)
+
+    resp = client.post(
+        "/jobs",
+        files={"file": ("song.wav", _upload_bytes(seed=21), "audio/wav")},
+        data={"mode": "full"},
+    )
+    job_id = resp.json()["job_id"]
+
+    seen_chunks_done = []
+    deadline = time.time() + 5
+    status = None
+    while time.time() < deadline:
+        status = client.get(f"/jobs/{job_id}").json()
+        seen_chunks_done.append(status["chunks_done"])
+        if status["status"] in ("done", "error"):
+            break
+        time.sleep(0.01)
+
+    assert status is not None and status["status"] == "done"
+    assert seen_chunks_done == sorted(seen_chunks_done)  # monotonic across the whole chained job
+    assert max(seen_chunks_done) == grand_total
+    assert bandit_total in seen_chunks_done  # the handoff point between passes was observed, not skipped
+
+
+def test_cache_hit_reports_from_cache(client):
+    upload_bytes = _upload_bytes(seed=22)
+
+    resp1 = client.post("/jobs", files={"file": ("song.wav", upload_bytes, "audio/wav")})
+    job1 = resp1.json()["job_id"]
+    status1 = _wait_for_terminal_status(client, job1)
+    assert status1["status"] == "done"
+    assert status1["from_cache"] is False
+
+    resp2 = client.post("/jobs", files={"file": ("song.wav", upload_bytes, "audio/wav")})
+    job2 = resp2.json()["job_id"]
+    status2 = _wait_for_terminal_status(client, job2)
+    assert status2["status"] == "done"
+    assert status2["from_cache"] is True
+
+
+def test_job_summary_includes_progress_fields(client):
+    resp = client.post("/jobs", files={"file": ("song.wav", _upload_bytes(seed=23), "audio/wav")})
+    job_id = resp.json()["job_id"]
+    status = _wait_for_terminal_status(client, job_id)
+
+    for key in (
+        "stem_count",
+        "progress_pct",
+        "submitted_at",
+        "stage_started_at",
+        "stage_timings",
+        "chunks_done",
+        "chunks_total",
+        "elapsed_seconds",
+        "eta_seconds",
+        "from_cache",
+    ):
+        assert key in status
+    assert status["stem_count"] == 4
+    assert status["progress_pct"] == 100
+    assert isinstance(status["progress_pct"], int)
+    assert status["elapsed_seconds"] >= 0
+    assert isinstance(status["stage_timings"], dict)
+    assert "separating" in status["stage_timings"]
+    assert status["stage_timings"]["separating"]["started_at"]
+    assert status["stage_timings"]["separating"]["ended_at"]

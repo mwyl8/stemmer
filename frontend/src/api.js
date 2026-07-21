@@ -57,7 +57,12 @@ export async function createJobFromUrl(url, { mode, tier } = {}) {
   return res.json()
 }
 
-/** {id, status, stage, progress, mode, tier, error, created_at, expires_at, stems}. */
+/**
+ * {id, status, stage, progress_pct (int 0-100), mode, tier, stem_count, error,
+ *  created_at, expires_at, submitted_at, stage_started_at, stage_timings
+ *  ({stage: {started_at, ended_at}}), chunks_done, chunks_total,
+ *  elapsed_seconds, eta_seconds, from_cache, stems}.
+ */
 export async function getJob(jobId) {
   const res = await request(`/jobs/${jobId}`)
   return res.json()

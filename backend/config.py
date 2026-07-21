@@ -50,3 +50,29 @@ TIERS = {
     "best": {"music": "htdemucs_ft", "shifts": 1, "segment": 7},
 }
 DEFAULT_TIER = "fast"
+
+# 4-stem (vocals/drums/bass/other) is the locked default; 6-stem
+# (+guitar/piano, htdemucs_6s) is opt-in — same STFT-split ONNX export path
+# (scripts/export_onnx.py --model), just a different pretrained checkpoint.
+MUSIC_MODELS = {4: "htdemucs", 6: "htdemucs_6s"}
+STEM_COUNTS = tuple(MUSIC_MODELS)
+DEFAULT_STEM_COUNT = 4
+
+# Measured CPU real-time-factor (separation seconds per second of audio) per
+# tier, htdemucs/4-stem, music mode — used to seed eta_seconds before a job's
+# own chunk throughput is available (jobs.py/pool.py), then refined from
+# actual chunk timing as chunks land. Measured on the reference dev machine
+# (INTRA_OP_THREADS=15) via a 20s clip of data/test.mp3, averaged over
+# repeated runs; "fast" (int8 dynamic-quantized) measuring *slower* than
+# "balanced" (fp32) is real and reproducible here — onnxruntime's CPU EP
+# lacks fused int8 GEMM kernels for this graph's op pattern, so dynamic
+# quantization shrinks the model (58MB vs 174MB) without speeding it up on
+# this machine; re-measure via the Phase 6 eval harness before trusting these
+# elsewhere. "best" (htdemucs_ft) isn't wired to the product path yet
+# (router.py raises NotImplementedError) — its RTF is the PRD's documented
+# 4x-of-single-model estimate, not a measurement.
+TIER_RTF = {
+    "fast": 0.45,
+    "balanced": 0.25,
+    "best": 1.0,
+}

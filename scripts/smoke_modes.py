@@ -6,11 +6,15 @@ what each mode actually produces.
     uv run --group speech python scripts/smoke_modes.py
     uv run --group speech python scripts/smoke_modes.py --input /tmp/clip.wav --modes full
     uv run python scripts/smoke_modes.py --modes music   # no speech extras needed
+    uv run python scripts/smoke_modes.py --modes music --stems 6   # htdemucs_6s
 
 video/full modes need the `speech` extras (torch/torchaudio/pytorch-
 lightning/spafe) and the downloaded Bandit checkpoint
 (scripts/fetch_bandit_weights.py); music mode alone works from a plain
-`uv run`.
+`uv run`. `--stems 6` needs models/htdemucs_6s_core*.onnx exported first
+(scripts/export_onnx.py --model htdemucs_6s) and applies to the Demucs side
+of music/full mode only — video mode (Bandit alone) has no stem-count
+concept.
 """
 
 from __future__ import annotations
@@ -42,11 +46,11 @@ def ffmpeg_decode(input_path: Path, output_wav: Path, duration: float | None, of
     subprocess.run(cmd, check=True, capture_output=True, timeout=60)
 
 
-def run_mode(mode: str, wav_path: Path, tier: str, timeout: float) -> None:
-    output_dir = OUTPUT_ROOT / mode
-    print(f"\n=== mode={mode} tier={tier} ===")
-    stems = separate_in_subprocess(wav_path, output_dir, mode=mode, tier=tier, timeout=timeout)
-    for name, path in sorted(stems.items()):
+def run_mode(mode: str, wav_path: Path, tier: str, stems: int, timeout: float) -> None:
+    output_dir = OUTPUT_ROOT / mode if stems == 4 else OUTPUT_ROOT / f"{mode}_{stems}s"
+    print(f"\n=== mode={mode} tier={tier} stems={stems} ===")
+    result = separate_in_subprocess(wav_path, output_dir, mode=mode, tier=tier, stem_count=stems, timeout=timeout)
+    for name, path in sorted(result.items()):
         wav, _sr = sf.read(path, dtype="float32", always_2d=True)
         rms = float(np.sqrt(np.mean(wav**2)))
         print(f"  {name:8s} rms={rms:.6f}  ({path})")
@@ -58,6 +62,7 @@ def main() -> None:
     parser.add_argument("--duration", type=float, default=30.0, help="seconds to use (None via --duration -1 for the whole file)")
     parser.add_argument("--offset", type=float, default=0.0, help="start offset in seconds")
     parser.add_argument("--tier", default="balanced")
+    parser.add_argument("--stems", type=int, default=4, choices=(4, 6), help="Demucs stem count: 4 (default) or 6 (htdemucs_6s)")
     parser.add_argument("--timeout", type=float, default=1800.0)
     parser.add_argument("--modes", nargs="+", default=list(MODES), choices=MODES)
     args = parser.parse_args()
@@ -73,7 +78,7 @@ def main() -> None:
         ffmpeg_decode(args.input, wav_path, duration, args.offset)
 
         for mode in args.modes:
-            run_mode(mode, wav_path, tier=args.tier, timeout=args.timeout)
+            run_mode(mode, wav_path, tier=args.tier, stems=args.stems, timeout=args.timeout)
 
     print(f"\nall stems written under {OUTPUT_ROOT}/")
 

@@ -23,13 +23,20 @@ CREATE TABLE IF NOT EXISTS jobs (
     stage         TEXT NOT NULL,      -- queued | downloading | decoding | separating | encoding | done | error
     mode          TEXT NOT NULL,      -- music | video | full
     tier          TEXT NOT NULL,      -- fast | balanced | best
+    stem_count    INTEGER NOT NULL DEFAULT 4,  -- music/full mode only: 4 (default) or 6 (htdemucs_6s)
     source_type   TEXT NOT NULL,      -- upload | youtube | tiktok | instagram
     source_ref    TEXT,               -- original filename/temp upload path, or URL
     content_hash  TEXT,
-    progress      REAL NOT NULL DEFAULT 0,
+    progress_pct  INTEGER NOT NULL DEFAULT 0,  -- 0-100
     error         TEXT,
     created_at    TEXT NOT NULL,
-    expires_at    TEXT NOT NULL
+    expires_at    TEXT NOT NULL,
+    chunks_done       INTEGER NOT NULL DEFAULT 0,
+    chunks_total      INTEGER NOT NULL DEFAULT 0,
+    stage_timings     TEXT NOT NULL DEFAULT '{}',  -- JSON {stage: {started_at, ended_at}}
+    stage_started_at  TEXT,           -- when the current `stage` began
+    eta_seconds       REAL,           -- seeded from audio_duration*RTF, refined from chunk throughput
+    from_cache        INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_content_hash ON jobs (content_hash);
@@ -62,6 +69,22 @@ CREATE TABLE IF NOT EXISTS cache (
 """
 
 
+# Columns added after the initial jobs table shipped. CREATE TABLE IF NOT
+# EXISTS above only applies to brand-new databases; a pre-existing
+# data/stemmer.db needs each of these ALTER TABLE'd in explicitly (idempotent
+# — skipped if the column's already there) so upgrading in place never loses
+# job history.
+_JOBS_MIGRATIONS = [
+    ("stem_count", "INTEGER NOT NULL DEFAULT 4"),
+    ("chunks_done", "INTEGER NOT NULL DEFAULT 0"),
+    ("chunks_total", "INTEGER NOT NULL DEFAULT 0"),
+    ("stage_timings", "TEXT NOT NULL DEFAULT '{}'"),
+    ("stage_started_at", "TEXT"),
+    ("eta_seconds", "REAL"),
+    ("from_cache", "INTEGER NOT NULL DEFAULT 0"),
+]
+
+
 def job_dir(job_id: str) -> Path:
     return config.STEMS_DIR / job_id
 
@@ -75,6 +98,26 @@ def init_db(db_path: Path | None = None) -> None:
     ensure_data_dirs()
     with sqlite3.connect(db_path or config.DB_PATH) as conn:
         conn.executescript(SCHEMA)
+        _migrate_jobs_table(conn)
+
+
+def _migrate_jobs_table(conn: sqlite3.Connection) -> None:
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+    # `progress` (REAL 0-1) was renamed to `progress_pct` (INTEGER 0-100).
+    # ALTER TABLE ... RENAME COLUMN would keep the old REAL type affinity
+    # forever (SQLite has no ALTER COLUMN TYPE), which would silently turn
+    # every future write back into a float — so add the new INTEGER column
+    # fresh, backfill it, and drop the old one instead.
+    if "progress" in existing and "progress_pct" not in existing:
+        conn.execute("ALTER TABLE jobs ADD COLUMN progress_pct INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE jobs SET progress_pct = CAST(ROUND(progress * 100) AS INTEGER)")
+        conn.execute("ALTER TABLE jobs DROP COLUMN progress")
+        existing.discard("progress")
+        existing.add("progress_pct")
+    for column, decl in _JOBS_MIGRATIONS:
+        if column not in existing:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {decl}")
+    conn.commit()
 
 
 @contextmanager
