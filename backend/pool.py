@@ -23,7 +23,14 @@ import soundfile as sf
 
 from backend import cache, jobs
 from backend import runner as runner_mod
-from backend.config import ENCODE_TIMEOUT_SECONDS, MP3_BITRATE, POOL_SIZE, SEPARATE_TIMEOUT_SECONDS, TIER_RTF
+from backend.config import (
+    ENCODE_TIMEOUT_SECONDS,
+    MP3_BITRATE,
+    PIPELINE_VERSION,
+    POOL_SIZE,
+    SEPARATE_TIMEOUT_SECONDS,
+    TIER_RTF,
+)
 from backend.ingest import IngestError
 from backend.ingest import ingest as ingest_fn
 from backend.ingest._sandbox import run_subprocess
@@ -77,7 +84,8 @@ class WorkerPool:
 
 
 def process_job(job_id: str) -> None:
-    """ingest -> cache check -> (copy cached stems | separate + encode).
+    """ingest (or reuse a prior job's persisted audio, for a re-run) -> cache
+    check -> (copy cached stems | separate + encode).
 
     Synchronous/blocking by design (see module docstring). Any failure is
     caught here and written to the job's `error` field rather than raised,
@@ -90,17 +98,26 @@ def process_job(job_id: str) -> None:
 
     wav_dir_to_clean: Path | None = None
     try:
-        if job.source_type == "upload":
+        if job.source_type == "rerun":
             jobs.update_stage(job_id, jobs.Stage.DECODING)
-            result = ingest_fn(file=job.source_ref)
+            wav_path, content_hash = _reuse_source_audio(job_id, job.source_ref)
         else:
-            jobs.update_stage(job_id, jobs.Stage.DOWNLOADING)
-            result = ingest_fn(url=job.source_ref)
+            if job.source_type == "upload":
+                jobs.update_stage(job_id, jobs.Stage.DECODING)
+                result = ingest_fn(file=job.source_ref)
+            else:
+                jobs.update_stage(job_id, jobs.Stage.DOWNLOADING)
+                result = ingest_fn(url=job.source_ref)
 
-        wav_dir_to_clean = result.wav_path.parent
-        jobs.set_content_hash(job_id, result.content_hash)
+            wav_dir_to_clean = result.wav_path.parent
+            wav_path, content_hash = result.wav_path, result.content_hash
+            jobs.set_content_hash(job_id, content_hash)
+            jobs.set_source_info(
+                job_id, result.source_codec, result.source_bitrate, result.source_sample_rate, result.source_channels
+            )
+            _persist_source_audio(job_id, wav_path)
 
-        cached_job_id = cache.find(result.content_hash, job.mode, job.tier)
+        cached_job_id = cache.find(content_hash, job.mode, job.tier, PIPELINE_VERSION)
         if cached_job_id is not None:
             jobs.mark_from_cache(job_id)
             _copy_cached_stems(cached_job_id, job_id)
@@ -108,11 +125,11 @@ def process_job(job_id: str) -> None:
             return
 
         jobs.update_stage(job_id, jobs.Stage.SEPARATING)
-        audio_duration = sf.info(result.wav_path).duration
+        audio_duration = sf.info(wav_path).duration
         jobs.set_initial_eta(job_id, audio_duration * TIER_RTF.get(job.tier, TIER_RTF["balanced"]))
         output_dir = job_dir(job_id)
         stems = runner_mod.separate_in_subprocess(
-            result.wav_path,
+            wav_path,
             output_dir,
             mode=job.mode,
             tier=job.tier,
@@ -130,7 +147,7 @@ def process_job(job_id: str) -> None:
             jobs.add_stem(job_id, name, "mp3", str(mp3_path), duration)
 
         jobs.update_stage(job_id, jobs.Stage.DONE)
-        cache.put(result.content_hash, job.mode, job.tier, job_id)
+        cache.put(content_hash, job.mode, job.tier, PIPELINE_VERSION, job_id)
 
     except _KNOWN_FAILURES as exc:
         jobs.mark_error(job_id, str(exc))
@@ -144,11 +161,47 @@ def process_job(job_id: str) -> None:
             shutil.rmtree(Path(job.source_ref).parent, ignore_errors=True)
 
 
+def _persist_source_audio(job_id: str, wav_path: Path) -> None:
+    """Copies the normalized source WAV (plus an mp3 preview, for the
+    in-browser A/B toggle) into this job's own job_dir — same directory,
+    same TTL as its stems — so it survives past ingest's own cleanup
+    (`wav_dir_to_clean` above) for as long as the job itself is kept around.
+    Enables "re-run at a different mode/tier" (no re-upload/re-fetch needed)
+    and "A/B against the original" (PRD Addendum §2.3, §2.5) without adding
+    any persistence beyond what job_dir/TTL already provide."""
+    output_dir = job_dir(job_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_wav_path = output_dir / "source.wav"
+    shutil.copyfile(wav_path, source_wav_path)
+    _encode_mp3_preview(source_wav_path, output_dir / "source.mp3")
+    jobs.set_source_wav_path(job_id, str(source_wav_path))
+
+
+def _reuse_source_audio(job_id: str, original_job_id: str | None) -> tuple[Path, str]:
+    """Re-run path: instead of re-fetching/re-decoding, reuse a prior job's
+    already-persisted source WAV + content hash directly, copying it into
+    this job's own job_dir (so its lifetime doesn't depend on the original
+    job surviving). Raises IngestError (a known, user-facing failure) if the
+    original has since expired — its job_dir would already be gone."""
+    original = jobs.get_job(original_job_id) if original_job_id else None
+    if original is None or not original.source_wav_path or not Path(original.source_wav_path).exists():
+        raise IngestError("the original audio for this job has expired — please re-upload or re-submit the link")
+
+    jobs.set_source_info(
+        job_id, original.source_codec, original.source_bitrate, original.source_sample_rate, original.source_channels
+    )
+    _persist_source_audio(job_id, Path(original.source_wav_path))
+    jobs.set_content_hash(job_id, original.content_hash)
+    return job_dir(job_id) / "source.wav", original.content_hash
+
+
 def _copy_cached_stems(cached_job_id: str, new_job_id: str) -> None:
     """Copy a previously-separated job's stem files into the new job's own
     directory rather than just pointing at the same paths, so each job's
     files/TTL stay independent — the cached job could be purged later
-    without breaking this one."""
+    without breaking this one. Precomputed peaks (peaks.py) ride along too —
+    a cache-hit job never runs runner.py itself, which is where those are
+    normally written."""
     cached_job = jobs.get_job(cached_job_id)
     if cached_job is None:
         raise RuntimeError(f"cache pointed at missing job {cached_job_id}")
@@ -159,6 +212,10 @@ def _copy_cached_stems(cached_job_id: str, new_job_id: str) -> None:
         dst = output_dir / src.name
         shutil.copyfile(src, dst)
         jobs.add_stem(new_job_id, stem.name, stem.format, str(dst), stem.duration)
+        if stem.format == "wav":
+            peaks_src = job_dir(cached_job_id) / f"{stem.name}.peaks.json"
+            if peaks_src.exists():
+                shutil.copyfile(peaks_src, output_dir / f"{stem.name}.peaks.json")
 
 
 def _encode_mp3_preview(wav_path: Path, mp3_path: Path, timeout: float = ENCODE_TIMEOUT_SECONDS) -> None:

@@ -40,6 +40,18 @@ MP3_BITRATE = "192k"
 # How often the TTL background task sweeps for expired jobs.
 PURGE_INTERVAL_SECONDS = int(os.environ.get("STEMMER_PURGE_INTERVAL_SECONDS", 300))
 
+# Bump whenever separation, limiting, or encoding behavior changes — it's
+# part of the cache key (cache.py) so a code change invalidates stale
+# results instead of serving them from before the fix (e.g. the PCM_16
+# clipping bug: identical audio kept resolving to pre-fix clipped stems
+# until the DB was wiped by hand).
+#
+# v3: peak limiting switched from per-stem to global (apply_peak_safety_global)
+# — stems cached under v2 or earlier were each scaled by their own peak,
+# which destroys inter-stem balance (drums vs. vocals), so they must not be
+# served as cache hits anymore.
+PIPELINE_VERSION = 3
+
 MODES = ("music", "video", "full")
 DEFAULT_MODE = "music"
 

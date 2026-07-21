@@ -398,13 +398,151 @@ def test_job_summary_includes_progress_fields(client):
         "elapsed_seconds",
         "eta_seconds",
         "from_cache",
+        "source_codec",
+        "source_bitrate",
+        "source_sample_rate",
+        "source_channels",
     ):
         assert key in status
     assert status["stem_count"] == 4
     assert status["progress_pct"] == 100
+
+
+def test_job_summary_reports_real_source_metadata(client):
+    """The uploaded fixture is a real 44.1kHz stereo PCM WAV — ffprobe runs
+    for real here (not mocked), so this is what the pipeline actually saw,
+    not a canned value."""
+    resp = client.post("/jobs", files={"file": ("song.wav", _upload_bytes(seed=24), "audio/wav")})
+    job_id = resp.json()["job_id"]
+    status = _wait_for_terminal_status(client, job_id)
+
+    assert status["source_codec"] in ("pcm_s16le", "pcm_f32le")
+    assert status["source_sample_rate"] == SR
+    assert status["source_channels"] == 2
     assert isinstance(status["progress_pct"], int)
     assert status["elapsed_seconds"] >= 0
     assert isinstance(status["stage_timings"], dict)
     assert "separating" in status["stage_timings"]
     assert status["stage_timings"]["separating"]["started_at"]
     assert status["stage_timings"]["separating"]["ended_at"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b Part B: A/B original, re-run at a different mode/tier, export mix.
+# ---------------------------------------------------------------------------
+
+
+def test_job_summary_reports_has_original(client):
+    resp = client.post("/jobs", files={"file": ("song.wav", _upload_bytes(seed=30), "audio/wav")})
+    job_id = resp.json()["job_id"]
+    status = _wait_for_terminal_status(client, job_id)
+    assert status["has_original"] is True
+
+
+def test_get_original_streams_mp3(client):
+    resp = client.post("/jobs", files={"file": ("song.wav", _upload_bytes(seed=31), "audio/wav")})
+    job_id = resp.json()["job_id"]
+    _wait_for_terminal_status(client, job_id)
+
+    original_resp = client.get(f"/jobs/{job_id}/original")
+    assert original_resp.status_code == 200
+    assert original_resp.headers["content-type"] == "audio/mpeg"
+    assert len(original_resp.content) > 0
+
+
+def test_rerun_at_a_different_tier_reuses_source_without_reupload(client):
+    resp = client.post(
+        "/jobs",
+        files={"file": ("song.wav", _upload_bytes(seed=32), "audio/wav")},
+        data={"mode": "music", "tier": "fast"},
+    )
+    job_id = resp.json()["job_id"]
+    original_status = _wait_for_terminal_status(client, job_id)
+    assert original_status["tier"] == "fast"
+
+    # by now the original upload's temp dir has already been cleaned up by
+    # pool.py's own finally block -- a successful rerun proves it didn't
+    # need it, only the persisted source.wav
+    rerun_resp = client.post(f"/jobs/{job_id}/rerun", json={"tier": "balanced"})
+    assert rerun_resp.status_code == 201
+    new_job_id = rerun_resp.json()["job_id"]
+    assert new_job_id != job_id
+
+    new_status = _wait_for_terminal_status(client, new_job_id)
+    assert new_status["status"] == "done"
+    assert new_status["mode"] == "music"  # inherited from the original, not overridden
+    assert new_status["tier"] == "balanced"
+    assert new_status["source_sample_rate"] == original_status["source_sample_rate"]
+    assert len(new_status["stems"]) == 8
+
+
+def test_rerun_at_the_same_tier_is_a_cache_hit(client):
+    resp = client.post(
+        "/jobs",
+        files={"file": ("song.wav", _upload_bytes(seed=33), "audio/wav")},
+        data={"tier": "balanced"},
+    )
+    job_id = resp.json()["job_id"]
+    _wait_for_terminal_status(client, job_id)
+
+    rerun_resp = client.post(f"/jobs/{job_id}/rerun", json={"tier": "balanced"})
+    new_job_id = rerun_resp.json()["job_id"]
+    new_status = _wait_for_terminal_status(client, new_job_id)
+    assert new_status["from_cache"] is True
+
+
+def test_rerun_404s_for_unknown_job(client):
+    assert client.post("/jobs/does-not-exist/rerun", json={}).status_code == 404
+
+
+def test_rerun_409s_once_the_original_has_been_deleted(client):
+    resp = client.post("/jobs", files={"file": ("song.wav", _upload_bytes(seed=34), "audio/wav")})
+    job_id = resp.json()["job_id"]
+    _wait_for_terminal_status(client, job_id)
+
+    assert client.delete(f"/jobs/{job_id}").status_code == 204
+    assert client.post(f"/jobs/{job_id}/rerun", json={"tier": "balanced"}).status_code == 409
+
+
+def test_export_mix_returns_a_downloadable_wav(client):
+    resp = client.post("/jobs", files={"file": ("song.wav", _upload_bytes(seed=35), "audio/wav")})
+    job_id = resp.json()["job_id"]
+    _wait_for_terminal_status(client, job_id)
+
+    mix_resp = client.post(
+        f"/jobs/{job_id}/export-mix",
+        json={"tracks": [{"name": "drums", "muted": True}], "master_volume": 0.8},
+    )
+    assert mix_resp.status_code == 200
+    assert mix_resp.headers["content-type"] == "audio/wav"
+    assert len(mix_resp.content) > 0
+
+
+def test_export_mix_422s_when_everything_is_muted(client):
+    resp = client.post("/jobs", files={"file": ("song.wav", _upload_bytes(seed=36), "audio/wav")})
+    job_id = resp.json()["job_id"]
+    _wait_for_terminal_status(client, job_id)
+
+    mix_resp = client.post(f"/jobs/{job_id}/export-mix", json={"master_muted": True})
+    assert mix_resp.status_code == 422
+
+
+def test_export_mix_409_before_job_done(client, monkeypatch):
+    import threading
+
+    release = threading.Event()
+
+    def _blocking(*args, **kwargs):
+        release.wait(timeout=2)
+        raise pool_mod.SeparationFailed("cancelled for test")
+
+    monkeypatch.setattr(pool_mod.runner_mod, "separate_in_subprocess", _blocking)
+    resp = client.post("/jobs", files={"file": ("song.wav", _upload_bytes(seed=37), "audio/wav")})
+    job_id = resp.json()["job_id"]
+
+    deadline = time.time() + 2
+    while client.get(f"/jobs/{job_id}").json()["status"] == "queued" and time.time() < deadline:
+        time.sleep(0.02)
+
+    assert client.post(f"/jobs/{job_id}/export-mix", json={}).status_code == 409
+    release.set()

@@ -3,7 +3,10 @@ import { useNavigate } from 'react-router-dom'
 import Uploader from '../components/Uploader'
 import LinkInput from '../components/LinkInput'
 import ModeTierPicker from '../components/ModeTierPicker'
+import RecentJobsList from '../components/RecentJobsList'
 import { ApiError, createJobFromFile, createJobFromUrl } from '../api'
+import { recordRecentJob } from '../lib/recentJobs'
+import { jobRoute } from '../lib/routes'
 
 export default function HomePage() {
   const navigate = useNavigate()
@@ -37,7 +40,8 @@ export default function HomePage() {
       const { job_id } = hasFile
         ? await createJobFromFile(file, { mode, tier })
         : await createJobFromUrl(url.trim(), { mode, tier })
-      navigate(`/jobs/${job_id}`, { state: { source: hasFile ? 'file' : 'url' } })
+      recordRecentJob({ id: job_id, mode, tier, sourceLabel: hasFile ? file.name : url.trim() })
+      navigate(jobRoute(job_id), { state: { source: hasFile ? 'file' : 'url' } })
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Something went wrong submitting the job.')
       setSubmitting(false)
@@ -78,6 +82,8 @@ export default function HomePage() {
           {submitting ? 'Submitting…' : 'Separate'}
         </button>
       </form>
+
+      <RecentJobsList />
     </div>
   )
 }

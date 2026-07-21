@@ -98,6 +98,15 @@ export default function Transport({ player, hasKaraokeTarget, onToggleKaraoke })
           Karaoke
         </TransportButton>
       )}
+
+      <TransportButton
+        onClick={() => player.setVuMetersEnabled(!player.vuMetersEnabled)}
+        disabled={!player.ready}
+        label="Toggle VU meters — turn off to check whether they're causing playback glitches"
+        active={player.vuMetersEnabled}
+      >
+        Meters {player.vuMetersEnabled ? 'on' : 'off'}
+      </TransportButton>
     </div>
   )
 }

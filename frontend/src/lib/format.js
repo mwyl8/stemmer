@@ -21,3 +21,16 @@ export function formatDurationWords(seconds) {
   if (m === 0) return `${s}s`
   return `${m}m ${s}s`
 }
+
+/** "320 kbps" from a bits/sec bitrate — null-safe for sources ffprobe
+ * couldn't read (e.g. a codec with no fixed bitrate field). */
+export function formatBitrate(bitsPerSecond) {
+  if (!Number.isFinite(bitsPerSecond) || bitsPerSecond <= 0) return null
+  return `${Math.round(bitsPerSecond / 1000)} kbps`
+}
+
+/** "44.1 kHz" from a sample rate in Hz. */
+export function formatSampleRate(hz) {
+  if (!Number.isFinite(hz) || hz <= 0) return null
+  return `${(hz / 1000).toFixed(1)} kHz`
+}

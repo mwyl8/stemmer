@@ -157,6 +157,20 @@ def test_fetch_happy_path(monkeypatch):
     assert len(fake.calls) == 2  # probe + download
 
 
+def test_fetch_requests_bestaudio_not_default_format(monkeypatch):
+    """Without -f, yt-dlp's default format selection can pick a muxed
+    video+audio format whose audio track is lower quality than the
+    platform's dedicated audio-only streams — bestaudio/best skips video
+    and gets the best audio-only stream directly (Part A finding #1)."""
+    fake = _fake_run_subprocess(probe_duration=10, download_size=1024)
+    monkeypatch.setattr(fetch, "run_subprocess", fake)
+    fetch.fetch("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    download_cmd = fake.calls[1]  # calls[0] is the --dump-json probe
+    assert "-f" in download_cmd
+    assert download_cmd[download_cmd.index("-f") + 1] == "bestaudio/best"
+
+
 # ---------------------------------------------------------------------------
 # decode() — real ffmpeg on a tiny generated fixture (local, fast, no network)
 # ---------------------------------------------------------------------------

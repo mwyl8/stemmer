@@ -36,7 +36,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     stage_timings     TEXT NOT NULL DEFAULT '{}',  -- JSON {stage: {started_at, ended_at}}
     stage_started_at  TEXT,           -- when the current `stage` began
     eta_seconds       REAL,           -- seeded from audio_duration*RTF, refined from chunk throughput
-    from_cache        INTEGER NOT NULL DEFAULT 0
+    from_cache        INTEGER NOT NULL DEFAULT 0,
+    source_codec       TEXT,          -- ffprobe codec_name of the original source, pre-normalization
+    source_bitrate     INTEGER,       -- bits/sec
+    source_sample_rate INTEGER,
+    source_channels    INTEGER,
+    source_wav_path    TEXT           -- normalized WAV persisted in job_dir(id) for this job's TTL,
+                                       -- so "A/B against original" and "re-run at a different mode/
+                                       -- tier" don't need the raw upload/URL again (pool.py)
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_content_hash ON jobs (content_hash);
@@ -53,18 +60,22 @@ CREATE TABLE IF NOT EXISTS stems (
 
 CREATE INDEX IF NOT EXISTS idx_stems_job_id ON stems (job_id);
 
--- Dedup key is (content_hash, mode, tier): the same audio at a different
--- tier is a different quality result, so it gets its own cache entry.
+-- Dedup key is (content_hash, mode, tier, pipeline_version): the same audio
+-- at a different tier is a different quality result, so it gets its own
+-- cache entry. pipeline_version (config.PIPELINE_VERSION) is part of the key
+-- so a separation/limiting/encoding code change can't serve stale results
+-- for audio that was already processed under the old behavior.
 -- ON DELETE CASCADE means a cache entry disappears the moment the job it
 -- points at is purged (TTL or DELETE /jobs/{id}) — it can never point at
 -- stems that no longer exist on disk.
 CREATE TABLE IF NOT EXISTS cache (
-    content_hash TEXT NOT NULL,
-    mode         TEXT NOT NULL,
-    tier         TEXT NOT NULL,
-    job_id       TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
-    created_at   TEXT NOT NULL,
-    PRIMARY KEY (content_hash, mode, tier)
+    content_hash     TEXT NOT NULL,
+    mode             TEXT NOT NULL,
+    tier             TEXT NOT NULL,
+    pipeline_version INTEGER NOT NULL,
+    job_id           TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+    created_at       TEXT NOT NULL,
+    PRIMARY KEY (content_hash, mode, tier, pipeline_version)
 );
 """
 
@@ -82,6 +93,11 @@ _JOBS_MIGRATIONS = [
     ("stage_started_at", "TEXT"),
     ("eta_seconds", "REAL"),
     ("from_cache", "INTEGER NOT NULL DEFAULT 0"),
+    ("source_codec", "TEXT"),
+    ("source_bitrate", "INTEGER"),
+    ("source_sample_rate", "INTEGER"),
+    ("source_channels", "INTEGER"),
+    ("source_wav_path", "TEXT"),
 ]
 
 
@@ -99,6 +115,7 @@ def init_db(db_path: Path | None = None) -> None:
     with sqlite3.connect(db_path or config.DB_PATH) as conn:
         conn.executescript(SCHEMA)
         _migrate_jobs_table(conn)
+        _migrate_cache_table(conn)
 
 
 def _migrate_jobs_table(conn: sqlite3.Connection) -> None:
@@ -117,6 +134,37 @@ def _migrate_jobs_table(conn: sqlite3.Connection) -> None:
     for column, decl in _JOBS_MIGRATIONS:
         if column not in existing:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {decl}")
+    conn.commit()
+
+
+def _migrate_cache_table(conn: sqlite3.Connection) -> None:
+    # pipeline_version joined the PRIMARY KEY, and SQLite can't ALTER a
+    # table's primary key in place, so a pre-existing cache table (from
+    # before PIPELINE_VERSION existed) is rebuilt rather than patched.
+    # Old rows get pipeline_version=0, a sentinel below any real
+    # PIPELINE_VERSION (starts at 1) — every one of them misses on lookup,
+    # which is the intended effect: entries written under unknown, possibly
+    # pre-fix code are never served as if they matched today's pipeline.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(cache)")}
+    if not existing or "pipeline_version" in existing:
+        return
+    conn.execute("ALTER TABLE cache RENAME TO cache_old")
+    conn.execute(
+        "CREATE TABLE cache ("
+        "    content_hash     TEXT NOT NULL,"
+        "    mode             TEXT NOT NULL,"
+        "    tier             TEXT NOT NULL,"
+        "    pipeline_version INTEGER NOT NULL,"
+        "    job_id           TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,"
+        "    created_at       TEXT NOT NULL,"
+        "    PRIMARY KEY (content_hash, mode, tier, pipeline_version)"
+        ")"
+    )
+    conn.execute(
+        "INSERT INTO cache (content_hash, mode, tier, pipeline_version, job_id, created_at) "
+        "SELECT content_hash, mode, tier, 0, job_id, created_at FROM cache_old"
+    )
+    conn.execute("DROP TABLE cache_old")
     conn.commit()
 
 

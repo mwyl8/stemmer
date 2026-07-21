@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import shutil
 import tempfile
@@ -18,6 +19,7 @@ import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import soundfile as sf
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
@@ -25,8 +27,9 @@ from starlette.background import BackgroundTask
 from backend import jobs
 from backend.config import DEFAULT_MODE, DEFAULT_STEM_COUNT, DEFAULT_TIER, MAX_UPLOAD_BYTES, MODES, STEM_COUNTS, TIERS
 from backend.ingest.fetch import InvalidURLError, classify_platform, validate_url
+from backend.mixdown import TrackAdjustment, mix_stems
 from backend.pool import WorkerPool
-from backend.storage import init_db
+from backend.storage import init_db, job_dir
 
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
@@ -150,6 +153,18 @@ def _job_summary(job: jobs.Job) -> dict:
         "elapsed_seconds": job.elapsed_seconds,
         "eta_seconds": job.eta_seconds,
         "from_cache": job.from_cache,
+        "source_codec": job.source_codec,
+        "source_bitrate": job.source_bitrate,
+        "source_sample_rate": job.source_sample_rate,
+        "source_channels": job.source_channels,
+        # Whether this job's normalized source audio is still persisted
+        # (job_dir, same TTL as its stems) — gates the "A/B against the
+        # original" toggle and the "re-run at a different mode/tier" action
+        # in the UI (PRD Addendum §2.3, §2.5). Checked on disk, not just the
+        # DB column: a purged job keeps its source_wav_path string around
+        # (only the jobs.status flips to 'expired' and the files are
+        # deleted), so the column alone can't tell "persisted" from "purged".
+        "has_original": bool(job.source_wav_path) and Path(job.source_wav_path).exists(),
         "stems": [{"name": s.name, "format": s.format, "duration": s.duration} for s in job.stems],
     }
 
@@ -182,6 +197,108 @@ def get_stem(job_id: str, name: str, format: str = "mp3") -> FileResponse:
         raise HTTPException(404, f"no {format} stem named {name!r} for this job")
     media_type = "audio/wav" if format == "wav" else "audio/mpeg"
     return FileResponse(stem.path, media_type=media_type, filename=f"{name}.{format}")
+
+
+@app.get("/jobs/{job_id}/stems/{name}/peaks")
+def get_stem_peaks(job_id: str, name: str) -> list:
+    """Precomputed waveform peaks (peaks.py) for one wav stem — lets the
+    player skip decoding the full mp3 client-side (PRD Addendum §2.5)."""
+    job = _get_job_or_404(job_id)
+    stem = next((s for s in job.stems if s.name == name and s.format == "wav"), None)
+    if stem is None:
+        raise HTTPException(404, f"no stem named {name!r} for this job")
+    peaks_path = job_dir(job_id) / f"{name}.peaks.json"
+    if not peaks_path.exists():
+        raise HTTPException(404, f"no precomputed peaks for stem {name!r}")
+    return json.loads(peaks_path.read_text())
+
+
+@app.get("/jobs/{job_id}/original")
+def get_original(job_id: str) -> FileResponse:
+    """The source mixture, as an mp3 preview — for the A/B toggle (PRD
+    Addendum §2.3). Persisted alongside the stems by pool.py's
+    `_persist_source_audio`; 404s once the job (and its job_dir) expires."""
+    job = _get_job_or_404(job_id)
+    if not job.source_wav_path:
+        raise HTTPException(404, "no original audio persisted for this job")
+    mp3_path = job_dir(job_id) / "source.mp3"
+    if not mp3_path.exists():
+        raise HTTPException(404, "original audio preview is missing")
+    return FileResponse(mp3_path, media_type="audio/mpeg", filename="original.mp3")
+
+
+@app.post("/jobs/{job_id}/rerun", status_code=201)
+async def rerun_job(job_id: str, request: Request) -> dict:
+    """Re-run this job's audio at a different mode/tier/stem_count without
+    re-uploading or re-fetching (PRD Addendum §2.5) — reuses the persisted
+    source WAV (pool.py's `_reuse_source_audio`) instead of the original
+    upload/URL, which may no longer exist by now."""
+    original = _get_job_or_404(job_id)
+    if not original.source_wav_path or not Path(original.source_wav_path).exists():
+        raise HTTPException(409, "original audio for this job has expired — please re-upload or re-submit the link")
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    mode, tier, stem_count = _validate_mode_tier_stems(
+        body.get("mode") or original.mode,
+        body.get("tier") or original.tier,
+        original.stem_count if body.get("stem_count") is None else body.get("stem_count"),
+    )
+
+    new_job_id = jobs.create_job(mode, tier, "rerun", job_id, stem_count=stem_count)
+    await request.app.state.pool.submit(new_job_id)
+    return {"job_id": new_job_id}
+
+
+@app.post("/jobs/{job_id}/export-mix")
+async def export_mix(job_id: str, request: Request) -> FileResponse:
+    """Mix down the full-quality wav stems with the given per-stem
+    volume/pan/mute/solo adjustments and hand back one downloadable wav (PRD
+    Addendum §2.3 "export a custom mix") — see mixdown.py for the math."""
+    job = _get_job_or_404(job_id)
+    if job.status != "done":
+        raise HTTPException(409, f"job is not done yet (status={job.status})")
+    wav_stems = {s.name: s.path for s in job.stems if s.format == "wav"}
+    if not wav_stems:
+        raise HTTPException(404, "no stems available for this job")
+
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(422, "expected a JSON body") from exc
+
+    adjustments = [
+        TrackAdjustment(
+            name=t["name"],
+            volume=float(t.get("volume", 1.0)),
+            pan=float(t.get("pan", 0.0)),
+            muted=bool(t.get("muted", False)),
+            solo=bool(t.get("solo", False)),
+        )
+        for t in body.get("tracks") or []
+        if t.get("name") in wav_stems
+    ]
+    master_volume = float(body.get("master_volume", 1.0))
+    master_muted = bool(body.get("master_muted", False))
+
+    try:
+        mixed = mix_stems(wav_stems, adjustments, master_volume, master_muted)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    fd, tmp_name = tempfile.mkstemp(suffix=".wav", prefix="stemmer-mix-")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    sf.write(tmp_path, mixed.audio.T, mixed.sample_rate)
+
+    return FileResponse(
+        tmp_path,
+        media_type="audio/wav",
+        filename=f"{job_id}-mix.wav",
+        background=BackgroundTask(lambda: tmp_path.unlink(missing_ok=True)),
+    )
 
 
 @app.get("/jobs/{job_id}/download")

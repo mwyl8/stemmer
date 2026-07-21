@@ -3,6 +3,7 @@ import useKeyboardShortcuts from '../hooks/useKeyboardShortcuts'
 import { stemColor } from '../lib/stemPalette'
 import Transport from './player/Transport'
 import Minimap from './player/Minimap'
+import MixToolbar from './player/MixToolbar'
 import StemRow from './StemRow'
 
 /** One synced multitrack transport loading the mp3 *previews* only — never
@@ -10,13 +11,15 @@ import StemRow from './StemRow'
  * in-browser). `stemNames` should be a referentially stable array (see
  * ResultView's useMemo) so this doesn't tear down and rebuild the player —
  * and restart playback — on every unrelated re-render. */
-export default function StemPlayer({ jobId, stemNames }) {
-  const player = useMultitrackPlayer(jobId, stemNames)
+export default function StemPlayer({ jobId, stemNames, hasOriginal }) {
+  const player = useMultitrackPlayer(jobId, stemNames, { hasOriginal })
   useKeyboardShortcuts(player.ready ? player : null)
 
   return (
     <div className="flex flex-col gap-4">
       <Transport player={player} hasKaraokeTarget={player.hasKaraokeTarget} onToggleKaraoke={player.toggleKaraoke} />
+
+      <MixToolbar jobId={jobId} player={player} stemNames={stemNames} />
 
       <Minimap player={player} />
 
@@ -33,11 +36,13 @@ export default function StemPlayer({ jobId, stemNames }) {
             color={stemColor(t.name)}
             isKaraokeTarget={player.hasKaraokeTarget && (t.name === 'vocals' || t.name === 'speech')}
             isFocused={player.focusedIndex === index}
+            showSpectrogram={player.spectrogramStems.has(index)}
             onFocus={() => player.setFocusedIndex(index)}
             onVolumeChange={(v) => player.setTrackVolume(index, v)}
             onPanChange={(p) => player.setTrackPan(index, p)}
             onToggleMute={() => player.toggleMute(index)}
             onToggleSolo={() => player.toggleSolo(index)}
+            onToggleSpectrogram={() => player.toggleSpectrogram(index)}
             registerMeterEl={player.registerMeterEl}
           />
         ))}

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -89,6 +90,14 @@ def separate_in_subprocess(
         raise SeparationFailed(f"runner subprocess failed (exit {proc.returncode}):\n{proc.stderr}")
 
     manifest = json.loads((output_dir / "stems.json").read_text())
+    if any(info.get("limited") for info in manifest.values()):
+        loudest_name = max(manifest, key=lambda name: manifest[name]["peak"])
+        logging.getLogger(__name__).warning(
+            "job %s: stem %r peaked at %.4f — all stems scaled down by the same factor "
+            "to avoid PCM_16 clipping while preserving inter-stem balance (peaks: %s)",
+            job_id, loudest_name, manifest[loudest_name]["peak"],
+            {name: info["peak"] for name, info in manifest.items()},
+        )
     return {name: output_dir / f"{name}.wav" for name in manifest}
 
 
@@ -96,6 +105,8 @@ def _main() -> None:
     import soundfile as sf
 
     from backend.config import MUSIC_SAMPLE_RATE
+    from backend.peaks import compute_peaks
+    from backend.separators.limiter import apply_peak_safety_global
     from backend.separators.router import select_separator
 
     parser = argparse.ArgumentParser()
@@ -124,11 +135,16 @@ def _main() -> None:
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    names = []
-    for name, wav in stems.items():
-        sf.write(output_dir / f"{name}.wav", wav.T, MUSIC_SAMPLE_RATE)
-        names.append(name)
-    (output_dir / "stems.json").write_text(json.dumps(names))
+    safe_stems, peaks, limited = apply_peak_safety_global(stems)
+    manifest = {}
+    for name, wav in safe_stems.items():
+        stem_path = output_dir / f"{name}.wav"
+        sf.write(stem_path, wav.T, MUSIC_SAMPLE_RATE)
+        manifest[name] = {"peak": round(peaks[name], 6), "limited": limited}
+        # Precomputed waveform peaks (PRD Addendum §2.5) so the player never
+        # has to decode the full file client-side — see peaks.py.
+        (output_dir / f"{name}.peaks.json").write_text(json.dumps(compute_peaks(stem_path)))
+    (output_dir / "stems.json").write_text(json.dumps(manifest))
 
 
 if __name__ == "__main__":

@@ -118,6 +118,16 @@ def fetch(url: str, timeout: float = FETCH_TIMEOUT_SECONDS) -> Path:
             str(int(timeout)),
             "--max-filesize",
             str(MAX_UPLOAD_BYTES),
+            # Without an explicit -f, yt-dlp's default format selection picks
+            # a pre-merged video+audio format, whose audio track is often a
+            # lower-bitrate stream than the platform's dedicated audio-only
+            # ones (e.g. YouTube serves multiple audio-only DASH streams up
+            # to ~160kbps Opus alongside muxed formats with a much cheaper
+            # audio track). "bestaudio/best" skips video entirely and picks
+            # the single highest-quality audio-only stream, falling back to
+            # "best" only on sources with no separate audio track at all.
+            "-f",
+            "bestaudio/best",
             "--extract-audio",
             "--audio-format",
             "wav",

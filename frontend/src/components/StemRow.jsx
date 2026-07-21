@@ -19,11 +19,13 @@ export default function StemRow({
   color,
   isKaraokeTarget,
   isFocused,
+  showSpectrogram,
   onFocus,
   onVolumeChange,
   onPanChange,
   onToggleMute,
   onToggleSolo,
+  onToggleSpectrogram,
   registerMeterEl,
 }) {
   return (
@@ -67,6 +69,18 @@ export default function StemRow({
           title="Solo (S)"
         >
           S
+        </button>
+        <button
+          type="button"
+          onClick={onToggleSpectrogram}
+          aria-pressed={showSpectrogram}
+          aria-label={`Toggle spectrogram for ${name}`}
+          className={`focus-ring h-7 w-7 shrink-0 rounded text-xs font-semibold transition-colors ${
+            showSpectrogram ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+          }`}
+          title="Toggle spectrogram view — the clearest way to see what separation actually removed"
+        >
+          ~
         </button>
       </div>
 

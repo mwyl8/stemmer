@@ -103,6 +103,11 @@ class Job:
     eta_seconds: float | None
     from_cache: bool
     elapsed_seconds: float
+    source_codec: str | None
+    source_bitrate: int | None
+    source_sample_rate: int | None
+    source_channels: int | None
+    source_wav_path: str | None
     stems: list[Stem] = field(default_factory=list)
 
     @property
@@ -174,6 +179,11 @@ def get_job(job_id: str) -> Job | None:
         eta_seconds=row["eta_seconds"],
         from_cache=bool(row["from_cache"]),
         elapsed_seconds=_compute_elapsed(row["created_at"], row["status"], stage_timings),
+        source_codec=row["source_codec"],
+        source_bitrate=row["source_bitrate"],
+        source_sample_rate=row["source_sample_rate"],
+        source_channels=row["source_channels"],
+        source_wav_path=row["source_wav_path"],
         stems=stems,
     )
 
@@ -255,6 +265,32 @@ def mark_error(job_id: str, error: str) -> None:
 def set_content_hash(job_id: str, content_hash: str) -> None:
     with get_connection() as conn:
         conn.execute("UPDATE jobs SET content_hash = ? WHERE id = ?", (content_hash, job_id))
+
+
+def set_source_info(
+    job_id: str,
+    codec: str | None,
+    bitrate: int | None,
+    sample_rate: int | None,
+    channels: int | None,
+) -> None:
+    """What the pipeline actually started from (PRD Addendum §2.5 job
+    metadata panel) — read off the source file by ingest.probe_source_info
+    before decode() normalizes it away."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE jobs SET source_codec = ?, source_bitrate = ?, source_sample_rate = ?, source_channels = ? WHERE id = ?",
+            (codec, bitrate, sample_rate, channels, job_id),
+        )
+
+
+def set_source_wav_path(job_id: str, path: str) -> None:
+    """Records where the normalized source WAV was persisted (job_dir(id),
+    same TTL as the job's stems) — read back by pool.py for re-run and by
+    app.py to serve "the original" for A/B comparison (PRD Addendum §2.3,
+    §2.5)."""
+    with get_connection() as conn:
+        conn.execute("UPDATE jobs SET source_wav_path = ? WHERE id = ?", (path, job_id))
 
 
 def add_stem(job_id: str, name: str, format: str, path: str, duration: float | None) -> None:

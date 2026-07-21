@@ -17,6 +17,7 @@ import soundfile as sf
 from backend.config import MAX_DURATION_SECONDS, MAX_UPLOAD_BYTES, MUSIC_SAMPLE_RATE
 from backend.ingest import decode as decode_mod
 from backend.ingest import fetch as fetch_mod
+from backend.ingest.probe import probe_source_info
 
 _HASH_CHUNK_BYTES = 1024 * 1024
 
@@ -29,6 +30,13 @@ class IngestError(RuntimeError):
 class IngestResult:
     wav_path: Path
     content_hash: str
+    # What the pipeline actually started from, read off the source file
+    # before decode() normalizes it away (PRD Addendum §2.5 job metadata
+    # panel) — None fields if ffprobe couldn't read it.
+    source_codec: str | None
+    source_bitrate: int | None
+    source_sample_rate: int | None
+    source_channels: int | None
 
 
 def ingest(file: Path | str | None = None, url: str | None = None, sample_rate: int = MUSIC_SAMPLE_RATE) -> IngestResult:
@@ -55,6 +63,7 @@ def ingest(file: Path | str | None = None, url: str | None = None, sample_rate: 
             if source_path.stat().st_size > MAX_UPLOAD_BYTES:
                 raise IngestError(f"file is {source_path.stat().st_size} bytes, exceeds cap of {MAX_UPLOAD_BYTES} bytes")
 
+        source_info = probe_source_info(source_path)
         wav_path = decode_mod.decode(source_path, sample_rate=sample_rate, mono=False)
     finally:
         if fetch_dir is not None:
@@ -65,7 +74,14 @@ def ingest(file: Path | str | None = None, url: str | None = None, sample_rate: 
         shutil.rmtree(wav_path.parent, ignore_errors=True)
         raise IngestError(f"duration {duration:.0f}s exceeds cap of {MAX_DURATION_SECONDS}s")
 
-    return IngestResult(wav_path=wav_path, content_hash=_hash_file(wav_path))
+    return IngestResult(
+        wav_path=wav_path,
+        content_hash=_hash_file(wav_path),
+        source_codec=source_info["codec"],
+        source_bitrate=source_info["bitrate"],
+        source_sample_rate=source_info["sample_rate"],
+        source_channels=source_info["channels"],
+    )
 
 
 def _hash_file(path: Path) -> str:

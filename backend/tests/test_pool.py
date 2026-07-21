@@ -200,3 +200,115 @@ def test_worker_pool_respects_configured_size(db, monkeypatch, pool_size):
 
     asyncio.run(run())
     assert max_seen == pool_size
+
+
+# ---------------------------------------------------------------------------
+# Phase 7b Part B: persisted source audio, re-run, and peaks copy-on-cache-hit.
+# ---------------------------------------------------------------------------
+
+
+def _fake_separate_with_peaks_factory(audio_data, sr):
+    """Like _fake_separate_factory, but also drops a {name}.peaks.json next
+    to each stem — matching what runner.py's real _main() does — so
+    cache-hit copying of peaks files (pool.py's _copy_cached_stems) has
+    something to actually copy."""
+
+    def _fake(input_wav, output_dir, mode="music", tier="balanced", stem_count=4, timeout=300, job_id=None):
+        import json
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out = {}
+        for name in ("vocals", "drums", "bass", "other"):
+            p = output_dir / f"{name}.wav"
+            sf.write(p, audio_data * 0.5, sr)
+            (output_dir / f"{name}.peaks.json").write_text(json.dumps([[0.1, -0.1]]))
+            out[name] = p
+        if job_id is not None:
+            jobs.update_progress(job_id, chunks_done=1, chunks_total=1)
+        return out
+
+    return _fake
+
+
+def test_process_job_persists_source_audio_for_rerun_and_ab(db, make_upload, monkeypatch):
+    import numpy as np
+
+    sr = 44100
+    data = (0.05 * np.random.default_rng(50).standard_normal((sr, 2))).astype(np.float32)
+    monkeypatch.setattr(pool.runner_mod, "separate_in_subprocess", _fake_separate_factory(data, sr))
+
+    upload_path = make_upload(seconds=1.0, seed=50)
+    job_id = jobs.create_job("music", "balanced", "upload", str(upload_path))
+    pool.process_job(job_id)
+
+    job = jobs.get_job(job_id)
+    assert job.status == "done"
+    assert job.source_wav_path is not None
+    assert Path(job.source_wav_path).exists()
+    assert (Path(job.source_wav_path).parent / "source.mp3").exists()
+
+
+def test_rerun_reuses_persisted_source_without_calling_ingest(db, make_upload, monkeypatch):
+    import numpy as np
+
+    sr = 44100
+    data = (0.05 * np.random.default_rng(51).standard_normal((sr, 2))).astype(np.float32)
+    monkeypatch.setattr(pool.runner_mod, "separate_in_subprocess", _fake_separate_factory(data, sr))
+
+    def _boom_if_called(*args, **kwargs):
+        raise AssertionError("rerun must not call ingest() -- it should reuse the persisted source wav")
+
+    upload_path = make_upload(seconds=1.0, seed=51)
+    original_id = jobs.create_job("music", "fast", "upload", str(upload_path))
+    pool.process_job(original_id)
+    assert jobs.get_job(original_id).status == "done"
+
+    # only patch ingest_fn AFTER the original job's own ingest has already run
+    monkeypatch.setattr(pool, "ingest_fn", _boom_if_called)
+
+    rerun_id = jobs.create_job("music", "balanced", "rerun", original_id)
+    pool.process_job(rerun_id)
+
+    rerun_job = jobs.get_job(rerun_id)
+    assert rerun_job.status == "done"
+    assert rerun_job.tier == "balanced"
+    assert rerun_job.content_hash == jobs.get_job(original_id).content_hash
+    assert len(rerun_job.stems) == 8
+
+
+def test_rerun_fails_cleanly_once_original_source_is_gone(db):
+    original_id = jobs.create_job("music", "fast", "upload", "/no/such/file.wav")
+    # never processed -> source_wav_path was never set
+
+    rerun_id = jobs.create_job("music", "balanced", "rerun", original_id)
+    pool.process_job(rerun_id)
+
+    rerun_job = jobs.get_job(rerun_id)
+    assert rerun_job.status == "error"
+    assert "expired" in rerun_job.error or "no such" in rerun_job.error.lower()
+
+
+def test_cache_hit_copies_peaks_json_alongside_stems(db, make_upload, monkeypatch):
+    import numpy as np
+
+    sr = 44100
+    data = (0.05 * np.random.default_rng(52).standard_normal((sr, 2))).astype(np.float32)
+    monkeypatch.setattr(pool.runner_mod, "separate_in_subprocess", _fake_separate_with_peaks_factory(data, sr))
+
+    upload1 = make_upload(seconds=1.0, seed=52)
+    job1 = jobs.create_job("music", "balanced", "upload", str(upload1))
+    pool.process_job(job1)
+    assert jobs.get_job(job1).status == "done"
+
+    upload2 = make_upload(seconds=1.0, seed=52)  # identical content -> cache hit
+    job2 = jobs.create_job("music", "balanced", "upload", str(upload2))
+    pool.process_job(job2)
+    job2_result = jobs.get_job(job2)
+    assert job2_result.status == "done"
+    assert job2_result.from_cache is True
+
+    from backend.storage import job_dir
+
+    for name in ("vocals", "drums", "bass", "other"):
+        assert (job_dir(job2) / f"{name}.peaks.json").exists()
