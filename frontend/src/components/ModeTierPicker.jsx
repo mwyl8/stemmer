@@ -1,11 +1,12 @@
 import { MODES, TIERS } from '../api'
 
-const MODE_LABELS = { music: 'Music', video: 'Video', full: 'Full', singing: 'Speech vs Singing' }
+const MODE_LABELS = { music: 'Music', video: 'Video', full: 'Full', singing: 'Speech vs Singing', karaoke: 'Lead vs Backing Vocals' }
 const MODE_HINTS = {
   music: 'vocals / drums / bass / other',
   video: 'speech / music / effects',
   full: 'speech / vocals / drums / bass / other',
   singing: 'spoken_speech / sung_vocals / instruments',
+  karaoke: 'lead_vocal / backing_vocals / instruments',
 }
 const TIER_LABELS = { fast: 'Fast', balanced: 'Balanced', best: 'Best' }
 

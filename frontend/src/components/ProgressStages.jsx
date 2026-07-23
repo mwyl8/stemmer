@@ -10,6 +10,14 @@ const ALL_STAGES = [
   { key: 'encoding', label: 'Encode' },
 ]
 
+// Modes that chain two separation passes (backend/separators/_two_stage_chain.py)
+// — worth telling the user why progress won't reset partway through.
+const CHAINED_MODE_LABELS = {
+  full: 'Full',
+  singing: 'Speech vs Singing',
+  karaoke: 'Lead vs Backing Vocals',
+}
+
 /** Staged bar + everything PRD §2.4 asks the progress UI to show: a live
  * elapsed timer, a *real* progress_pct bar driven by chunks_done/total (not
  * a spinner), the ETA before separation begins, per-stage timings, and an
@@ -61,10 +69,10 @@ export default function ProgressStages({ job, skipDownload }) {
           {showEta && <span className="text-slate-400">ETA ~{formatDurationWords(job.eta_seconds)}</span>}
         </div>
 
-        {(job.mode === 'full' || job.mode === 'singing') && job.stage === 'separating' && (
+        {CHAINED_MODE_LABELS[job.mode] && job.stage === 'separating' && (
           <p className="text-xs text-slate-500">
-            {job.mode === 'full' ? 'Full' : 'Speech vs Singing'} mode chains two separation passes (speech/music/effects,
-            then instruments) — progress above is weighted across both, so it won't reset partway through.
+            {CHAINED_MODE_LABELS[job.mode]} mode chains two separation passes — progress above is weighted across
+            both, so it won't reset partway through.
           </p>
         )}
       </div>

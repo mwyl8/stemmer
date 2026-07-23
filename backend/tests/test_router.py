@@ -15,6 +15,7 @@ from backend.separators import router
 from backend.separators.base import Separator
 from backend.separators.chained_sep import ChainedSeparator
 from backend.separators.demucs_onnx import DemucsONNXSeparator
+from backend.separators.lead_backing_sep import LeadBackingSeparator
 from backend.separators.router import select_separator
 from backend.separators.singing_sep import SpeechVsSingingSeparator
 
@@ -113,6 +114,36 @@ def test_singing_mode_propagates_bad_tier(monkeypatch):
     monkeypatch.setattr(router, "_select_bandit", lambda: object())
     with pytest.raises(NotImplementedError):
         select_separator("singing", "best")
+
+
+def test_karaoke_mode_chains_demucs_and_karaoke_on_configured_tier_and_stems(monkeypatch):
+    karaoke_sentinel = object()
+    demucs_calls = []
+
+    def fake_select_demucs(tier, stem_count=4):
+        demucs_calls.append((tier, stem_count))
+        return f"demucs-for-{tier}-{stem_count}"
+
+    monkeypatch.setattr(router, "_select_karaoke", lambda: karaoke_sentinel)
+    monkeypatch.setattr(router, "_select_demucs", fake_select_demucs)
+
+    sep = select_separator("karaoke", "balanced")
+
+    assert isinstance(sep, LeadBackingSeparator)
+    assert sep.karaoke is karaoke_sentinel
+    assert sep.demucs == "demucs-for-balanced-4"
+    assert demucs_calls == [("balanced", 4)]
+
+    demucs_calls.clear()
+    sep6 = select_separator("karaoke", "balanced", stem_count=6)
+    assert sep6.demucs == "demucs-for-balanced-6"
+    assert demucs_calls == [("balanced", 6)]
+
+
+def test_karaoke_mode_propagates_bad_tier(monkeypatch):
+    monkeypatch.setattr(router, "_select_karaoke", lambda: object())
+    with pytest.raises(NotImplementedError):
+        select_separator("karaoke", "best")
 
 
 def test_unknown_mode_raises():

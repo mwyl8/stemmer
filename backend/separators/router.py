@@ -16,6 +16,12 @@
                  into spoken_speech / sung_vocals / instruments instead —
                  "does the talking voice land in a different stem than the
                  singing voice" (singing_sep.py).
+- Karaoke mode -> chained the other direction: Demucs first, then the
+                 MelBandRoformer karaoke model on Demucs's *vocals* stem,
+                 merged into lead_vocal / backing_vocals / instruments —
+                 "lyrical separation" (lead_backing_sep.py). stem_count still
+                 drives the Demucs stage (extra Demucs sources at
+                 stem_count=6 just fold into `instruments`).
 
 Bandit's import (and its `speech` dependency group: torch/torchaudio/
 pytorch-lightning/spafe) is deferred into the video/full branches, never at
@@ -56,6 +62,10 @@ def select_separator(mode: str, tier: str, stem_count: int = DEFAULT_STEM_COUNT)
         from backend.separators.singing_sep import SpeechVsSingingSeparator
 
         return SpeechVsSingingSeparator(bandit=_select_bandit(), demucs=_select_demucs(tier, stem_count))
+    if mode == "karaoke":
+        from backend.separators.lead_backing_sep import LeadBackingSeparator
+
+        return LeadBackingSeparator(demucs=_select_demucs(tier, stem_count), karaoke=_select_karaoke())
     raise NotImplementedError(f"unknown mode {mode!r}")
 
 
@@ -79,3 +89,15 @@ def _select_bandit() -> Separator:
     from backend.separators.bandit_sep import BanditSeparator
 
     return BanditSeparator()
+
+
+def _select_karaoke() -> Separator:
+    # The karaoke model currently ships one checkpoint (fp32 only, not yet
+    # quantized) — tier doesn't affect it, same posture as Bandit above.
+    from backend.separators.karaoke_onnx import KaraokeONNXSeparator
+
+    model_path = MODELS_DIR / "karaoke_core.onnx"
+    metadata_path = MODELS_DIR / "karaoke_core.json"
+    if not model_path.exists():
+        raise NotImplementedError(f"{model_path} not exported yet — run: uv run --group eval python scripts/export_roformer_onnx.py")
+    return KaraokeONNXSeparator(model_path=model_path, metadata_path=metadata_path)

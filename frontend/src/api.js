@@ -6,7 +6,7 @@
 // them to the FastAPI backend (vite.config.js), and a production build would
 // be served from the same origin as the API. No CORS needed either way.
 
-export const MODES = ['music', 'video', 'full', 'singing']
+export const MODES = ['music', 'video', 'full', 'singing', 'karaoke']
 export const TIERS = ['fast', 'balanced', 'best']
 
 export class ApiError extends Error {
@@ -145,7 +145,9 @@ export async function deleteJob(jobId) {
 /** Terminal job statuses — polling should stop once status is one of these. */
 export const TERMINAL_STATUSES = new Set(['done', 'error', 'expired'])
 
-/** Stem names that count as "the vocal/speech stem" for the karaoke toggle,
- * across all four modes (music -> vocals; video -> speech; full -> both;
- * singing -> both, under their spoken_speech/sung_vocals names). */
-export const KARAOKE_STEM_NAMES = new Set(['vocals', 'speech', 'spoken_speech', 'sung_vocals'])
+/** Stem names that count as "the vocal/speech stem" for the karaoke toggle
+ * (mute-to-sing-along), across all five modes (music -> vocals; video ->
+ * speech; full -> both; singing -> both, under their spoken_speech/
+ * sung_vocals names; karaoke mode -> lead_vocal only — backing_vocals stays
+ * audible, same as a real karaoke track keeps its backing harmonies). */
+export const KARAOKE_STEM_NAMES = new Set(['vocals', 'speech', 'spoken_speech', 'sung_vocals', 'lead_vocal'])

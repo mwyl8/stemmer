@@ -22,7 +22,10 @@ dev = [
     "ruff>=0.15.22",
 ]
 eval = [
+    "beartype>=0.22.9",
     "demucs>=4.0.1",
+    "einops>=0.8.2",
+    "rotary-embedding-torch>=0.9.1",
     "torch>=2.13.0",
 ]
 speech = [

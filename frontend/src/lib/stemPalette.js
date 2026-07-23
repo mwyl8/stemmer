@@ -1,10 +1,11 @@
 // Consistent stem -> color mapping across the whole app (waveforms, VU
 // meters, color swatches). Keyed by the exact stem names the backend router
 // produces (backend/separators/router.py, chained_sep.py, bandit_sep.py,
-// singing_sep.py): music mode -> vocals/drums/bass/other(/guitar/piano for
-// 6-stem); video mode -> speech/music/effects; full mode ->
-// speech/vocals/drums/bass/other; singing mode ->
-// spoken_speech/sung_vocals/instruments. A name not in this table (future
+// singing_sep.py, lead_backing_sep.py): music mode -> vocals/drums/bass/
+// other(/guitar/piano for 6-stem); video mode -> speech/music/effects; full
+// mode -> speech/vocals/drums/bass/other; singing mode ->
+// spoken_speech/sung_vocals/instruments; karaoke mode ->
+// lead_vocal/backing_vocals/instruments. A name not in this table (future
 // stems) falls back to a stable cycle so the app never breaks, it just runs
 // out of hand-picked hues.
 const KNOWN_STEM_COLORS = {
@@ -20,6 +21,8 @@ const KNOWN_STEM_COLORS = {
   spoken_speech: { wave: '#818cf8', progress: '#4338ca', solid: '#818cf8' }, // indigo, same role as speech
   sung_vocals: { wave: '#f0abfc', progress: '#a21caf', solid: '#f0abfc' }, // fuchsia, distinct from spoken_speech
   instruments: { wave: '#94a3b8', progress: '#475569', solid: '#94a3b8' }, // slate, same role as other
+  lead_vocal: { wave: '#818cf8', progress: '#4338ca', solid: '#818cf8' }, // indigo, same role as vocals/speech
+  backing_vocals: { wave: '#fb7185', progress: '#be123c', solid: '#fb7185' }, // rose, distinct from lead_vocal
 }
 
 const FALLBACK_CYCLE = [

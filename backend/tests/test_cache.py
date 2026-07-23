@@ -53,3 +53,19 @@ def test_find_misses_on_different_mode_or_tier_as_before(db):
     cache.put("hash-a", "music", "balanced", 1, job_id)
     assert cache.find("hash-a", "video", "balanced", 1) is None
     assert cache.find("hash-a", "music", "fast", 1) is None
+
+
+def test_karaoke_mode_gets_its_own_cache_entry_distinct_from_other_modes(db):
+    """New mode, same generic (content_hash, mode, tier, pipeline_version)
+    key cache.py already used for singing/full — same audio run in karaoke
+    mode must not collide with (or be served by) an entry from any other
+    mode, and vice versa."""
+    karaoke_job_id = _make_done_job(mode="karaoke")
+    cache.put("hash-a", "karaoke", "balanced", 1, karaoke_job_id)
+
+    music_job_id = _make_done_job(mode="music")
+    cache.put("hash-a", "music", "balanced", 1, music_job_id)
+
+    assert cache.find("hash-a", "karaoke", "balanced", 1) == karaoke_job_id
+    assert cache.find("hash-a", "music", "balanced", 1) == music_job_id
+    assert cache.find("hash-a", "singing", "balanced", 1) is None

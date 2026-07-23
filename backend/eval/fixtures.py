@@ -1,15 +1,16 @@
-"""Synthetic Speech-vs-Singing eval fixture. No real speech/singing
-recordings ship in this repo — CLAUDE.md forbids redistributing third-party
-audio, and licensing a real clip with both a talking voice and a singing
-voice for a test fixture isn't something to do casually. This procedurally
-generates stand-ins for "a talking voice" (choppy, syllable-gated bursts —
-speech's rhythmic cadence) and "a singing voice" (sustained, vibrato'd
-tones — singing's held-note cadence), mixed with a simple instrument bed.
+"""Synthetic eval fixtures for Speech-vs-Singing and Lead-vs-Backing-Vocals
+modes. No real speech/singing/harmony recordings ship in this repo —
+CLAUDE.md forbids redistributing third-party audio, and licensing a real
+clip with the specific vocal arrangement each eval needs isn't something to
+do casually. These procedurally generate stand-ins with the structural
+property each eval needs (a talking-vs-singing cadence difference; a
+lead-only section vs. a stacked-harmony section), mixed with a simple
+instrument bed.
 
-This is a smoke-level regression fixture, not a claim that synthetic
-stand-ins predict real-world vocal separation quality — see
-scripts/eval_singing_vs_speech.py's printed report for the honest version of
-that caveat.
+These are smoke-level regression fixtures, not a claim that synthetic
+stand-ins predict real-world separation quality — see
+scripts/eval_singing_vs_speech.py's and scripts/eval_lead_vs_backing.py's
+printed reports for the honest version of that caveat.
 """
 
 from __future__ import annotations
@@ -26,6 +27,16 @@ class SingingFixture:
     spoken_speech: np.ndarray  # (2, samples) — ground truth "talking" track
     sung_vocals: np.ndarray  # (2, samples) — ground truth "singing" track
     instruments: np.ndarray  # (2, samples) — ground truth instrument bed
+
+
+@dataclass(frozen=True)
+class LeadBackingFixture:
+    sample_rate: int
+    lead_only_seconds: float  # [0, lead_only_seconds) has no backing vocals at all
+    mixture: np.ndarray  # (2, samples)
+    lead_vocal: np.ndarray  # (2, samples) — ground truth lead melody, present throughout
+    backing_vocals: np.ndarray  # (2, samples) — ground truth harmony stack, silent until lead_only_seconds
+    instruments: np.ndarray  # (2, samples)
 
 
 def make_speech_vs_singing_fixture(duration: float = 6.0, sr: int = 44100, seed: int = 0) -> SingingFixture:
@@ -49,6 +60,50 @@ def make_speech_vs_singing_fixture(duration: float = 6.0, sr: int = 44100, seed:
         sung_vocals=sung_vocals,
         instruments=instruments,
     )
+
+
+def make_lead_vs_backing_fixture(
+    lead_only_seconds: float = 6.0, harmony_seconds: float = 6.0, sr: int = 44100, seed: int = 0
+) -> LeadBackingFixture:
+    """First `lead_only_seconds`: lead melody alone, no backing vocals at
+    all — a clean baseline. Next `harmony_seconds`: the same lead continues,
+    joined by a stacked 3-voice harmony a third and a fifth above it (a
+    "big harmony chorus") — the section that should show up in
+    `backing_vocals`, not bleed into `lead_vocal`."""
+    rng = np.random.default_rng(seed)
+    duration = lead_only_seconds + harmony_seconds
+    lead_notes = (196.0, 220.0, 246.9, 220.0, 196.0, 220.0)  # G3 A3 B3 A3 G3 A3, repeats to fill duration
+
+    lead_mono = _sung_melody(duration, sr, notes_hz=lead_notes)
+    harmony_mono = _harmony_stack(duration, sr, notes_hz=lead_notes, intervals=(1.25, 1.5))  # major third, perfect fifth
+    instruments_mono = _instrument_bed(duration, sr, rng)
+
+    # Gate the harmony stack to silence during the lead-only section.
+    gate = np.ones(len(harmony_mono), dtype=np.float32)
+    gate[: int(lead_only_seconds * sr)] = 0.0
+    harmony_mono = harmony_mono * gate
+
+    lead_vocal = _to_stereo(lead_mono, gain=0.5)
+    backing_vocals = _to_stereo(harmony_mono, gain=0.5)
+    instruments = _to_stereo(instruments_mono, gain=0.35)
+    mixture = lead_vocal + backing_vocals + instruments
+
+    return LeadBackingFixture(
+        sample_rate=sr,
+        lead_only_seconds=lead_only_seconds,
+        mixture=mixture,
+        lead_vocal=lead_vocal,
+        backing_vocals=backing_vocals,
+        instruments=instruments,
+    )
+
+
+def _harmony_stack(duration: float, sr: int, notes_hz: tuple[float, ...], intervals: tuple[float, ...]) -> np.ndarray:
+    """Sum of the same melody transposed up by each ratio in `intervals` —
+    e.g. 1.25 (~major third) and 1.5 (perfect fifth) stacked on the lead
+    line produces the "big harmony chorus" this fixture needs."""
+    voices = [_sung_melody(duration, sr, notes_hz=tuple(f * ratio for f in notes_hz)) for ratio in intervals]
+    return (np.sum(voices, axis=0) / len(voices)).astype(np.float32)
 
 
 def _to_stereo(mono: np.ndarray, gain: float) -> np.ndarray:

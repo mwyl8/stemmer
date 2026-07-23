@@ -1,5 +1,5 @@
 """Speech-vs-Singing mode's chained pipeline: the same Bandit-then-Demucs
-chain as Full mode (chained_sep.py — see _bandit_demucs_chain.py for the
+chain as Full mode (chained_sep.py — see _two_stage_chain.py for the
 shared two-pass mechanics), but merged for a different question. Full mode
 asks "what are all the instrument stems"; this mode asks "does the talking
 voice end up in a different file than the singing voice". Bandit's "speech"
@@ -26,8 +26,9 @@ from collections.abc import Callable
 
 import numpy as np
 
-from backend.separators._bandit_demucs_chain import run_chain
+from backend.separators._two_stage_chain import run_chain
 from backend.separators.base import Separator
+from backend.separators.chained_sep import MUSIC_STEM_NAME
 
 SPOKEN_STEM_NAME = "spoken_speech"
 SUNG_STEM_NAME = "sung_vocals"
@@ -45,7 +46,7 @@ class SpeechVsSingingSeparator(Separator):
         return self.demucs.runtime_info()
 
     def separate(self, audio: np.ndarray, on_chunk: Callable[[int, int], None] | None = None) -> dict[str, np.ndarray]:
-        bandit_stems, demucs_stems = run_chain(self.bandit, self.demucs, audio, on_chunk)
+        bandit_stems, demucs_stems = run_chain(self.bandit, self.demucs, audio, MUSIC_STEM_NAME, on_chunk)
         instrument_sources = [demucs_stems[name] for name in demucs_stems if name != _DEMUCS_VOCAL_SOURCE]
         instruments = np.sum(instrument_sources, axis=0).astype(np.float32)
         return {

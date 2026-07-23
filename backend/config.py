@@ -53,7 +53,7 @@ PURGE_INTERVAL_SECONDS = int(os.environ.get("STEMMER_PURGE_INTERVAL_SECONDS", 30
 # served as cache hits anymore.
 PIPELINE_VERSION = 3
 
-MODES = ("music", "video", "full", "singing")
+MODES = ("music", "video", "full", "singing", "karaoke")
 DEFAULT_MODE = "music"
 
 # Fast/Balanced/Best map to model + shifts + segment size (decision 6, PRD §5).
