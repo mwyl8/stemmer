@@ -1,20 +1,22 @@
-"""Phase 4 smoke test: run music/video/full modes on the same clip via the
-real isolated-subprocess runner (no mocks), writing data/out_modes/{mode}/
-{stem}.wav and printing per-stem RMS so you can eyeball — or listen to —
-what each mode actually produces.
+"""Phase 4 smoke test: run music/video/full/singing modes on the same clip
+via the real isolated-subprocess runner (no mocks), writing
+data/out_modes/{mode}/{stem}.wav and printing per-stem RMS so you can
+eyeball — or listen to — what each mode actually produces.
 
     uv run --group speech python scripts/smoke_modes.py
     uv run --group speech python scripts/smoke_modes.py --input /tmp/clip.wav --modes full
     uv run python scripts/smoke_modes.py --modes music   # no speech extras needed
     uv run python scripts/smoke_modes.py --modes music --stems 6   # htdemucs_6s
 
-video/full modes need the `speech` extras (torch/torchaudio/pytorch-
-lightning/spafe) and the downloaded Bandit checkpoint
+video/full/singing modes need the `speech` extras (torch/torchaudio/
+pytorch-lightning/spafe) and the downloaded Bandit checkpoint
 (scripts/fetch_bandit_weights.py); music mode alone works from a plain
 `uv run`. `--stems 6` needs models/htdemucs_6s_core*.onnx exported first
 (scripts/export_onnx.py --model htdemucs_6s) and applies to the Demucs side
-of music/full mode only — video mode (Bandit alone) has no stem-count
-concept.
+of music/full/singing modes only — video mode (Bandit alone) has no
+stem-count concept. For a synthetic fixture built specifically to expose
+speech/singing bleed (rather than test.mp3, which has no real speech), see
+scripts/eval_singing_vs_speech.py instead.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from backend.runner import separate_in_subprocess
 
 DEFAULT_INPUT_PATH = DATA_DIR / "test.mp3"
 OUTPUT_ROOT = DATA_DIR / "out_modes"
-MODES = ("music", "video", "full")
+MODES = ("music", "video", "full", "singing")
 
 
 def ffmpeg_decode(input_path: Path, output_wav: Path, duration: float | None, offset: float) -> None:

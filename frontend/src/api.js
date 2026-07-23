@@ -6,7 +6,7 @@
 // them to the FastAPI backend (vite.config.js), and a production build would
 // be served from the same origin as the API. No CORS needed either way.
 
-export const MODES = ['music', 'video', 'full']
+export const MODES = ['music', 'video', 'full', 'singing']
 export const TIERS = ['fast', 'balanced', 'best']
 
 export class ApiError extends Error {
@@ -65,7 +65,12 @@ export async function createJobFromUrl(url, { mode, tier } = {}) {
  *  source_codec, source_bitrate (bits/sec), source_sample_rate, source_channels
  *  (what the pipeline actually started from, read off the source file before
  *  normalization — null until ingest finishes; null fields if ffprobe couldn't
- *  read the source), stems}.
+ *  read the source),
+ *  runtime_arch, runtime_provider, runtime_model (which host arch bucket,
+ *  ONNX Runtime execution provider, and model file actually separated this
+ *  job — backend/arch.py; null until the separating stage reaches that
+ *  point, and always null for video mode's Bandit-only path, which has no
+ *  ONNX runtime concept yet), stems}.
  */
 export async function getJob(jobId) {
   const res = await request(`/jobs/${jobId}`)
@@ -141,5 +146,6 @@ export async function deleteJob(jobId) {
 export const TERMINAL_STATUSES = new Set(['done', 'error', 'expired'])
 
 /** Stem names that count as "the vocal/speech stem" for the karaoke toggle,
- * across all three modes (music -> vocals; video -> speech; full -> both). */
-export const KARAOKE_STEM_NAMES = new Set(['vocals', 'speech'])
+ * across all four modes (music -> vocals; video -> speech; full -> both;
+ * singing -> both, under their spoken_speech/sung_vocals names). */
+export const KARAOKE_STEM_NAMES = new Set(['vocals', 'speech', 'spoken_speech', 'sung_vocals'])

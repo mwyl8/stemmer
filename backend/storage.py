@@ -41,9 +41,12 @@ CREATE TABLE IF NOT EXISTS jobs (
     source_bitrate     INTEGER,       -- bits/sec
     source_sample_rate INTEGER,
     source_channels    INTEGER,
-    source_wav_path    TEXT           -- normalized WAV persisted in job_dir(id) for this job's TTL,
+    source_wav_path    TEXT,          -- normalized WAV persisted in job_dir(id) for this job's TTL,
                                        -- so "A/B against original" and "re-run at a different mode/
                                        -- tier" don't need the raw upload/URL again (pool.py)
+    runtime_arch        TEXT,         -- backend.arch.HostArch.profile_key that actually ran this job
+    runtime_provider    TEXT,         -- ONNX Runtime execution provider actually in effect
+    runtime_model       TEXT          -- ONNX model file (stem) actually loaded
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_content_hash ON jobs (content_hash);
@@ -98,6 +101,9 @@ _JOBS_MIGRATIONS = [
     ("source_sample_rate", "INTEGER"),
     ("source_channels", "INTEGER"),
     ("source_wav_path", "TEXT"),
+    ("runtime_arch", "TEXT"),
+    ("runtime_provider", "TEXT"),
+    ("runtime_model", "TEXT"),
 ]
 
 

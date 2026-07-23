@@ -37,6 +37,12 @@ export default function ResultView({ job, onDelete }) {
     job.source_channels === 1 ? 'mono' : job.source_channels === 2 ? 'stereo' : job.source_channels ? `${job.source_channels}ch` : null,
   ].filter(Boolean)
 
+  // Which host arch / ONNX Runtime execution provider / model file actually
+  // ran this job (backend/arch.py) — null for modes with no ONNX runtime
+  // concept yet (video mode's Bandit-only path) or if separation hasn't
+  // reached that point yet.
+  const runtimeDetails = [job.runtime_arch, job.runtime_provider, job.runtime_model].filter(Boolean)
+
   async function handleDelete() {
     if (!window.confirm('Delete this job\'s stems now? This cannot be undone.')) return
     setDeleting(true)
@@ -87,6 +93,11 @@ export default function ResultView({ job, onDelete }) {
           {sourceDetails.length > 0 && (
             <p className="mt-0.5 text-xs text-slate-500">
               Source: <span className="tabular-nums">{sourceDetails.join(' · ')}</span>
+            </p>
+          )}
+          {runtimeDetails.length > 0 && (
+            <p className="mt-0.5 text-xs text-slate-500">
+              Runtime: <span className="tabular-nums">{runtimeDetails.join(' · ')}</span>
             </p>
           )}
         </div>

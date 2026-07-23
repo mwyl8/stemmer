@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -52,7 +53,7 @@ PURGE_INTERVAL_SECONDS = int(os.environ.get("STEMMER_PURGE_INTERVAL_SECONDS", 30
 # served as cache hits anymore.
 PIPELINE_VERSION = 3
 
-MODES = ("music", "video", "full")
+MODES = ("music", "video", "full", "singing")
 DEFAULT_MODE = "music"
 
 # Fast/Balanced/Best map to model + shifts + segment size (decision 6, PRD §5).
@@ -61,7 +62,10 @@ TIERS = {
     "balanced": {"music": "htdemucs_onnx", "shifts": 0, "segment": 7},
     "best": {"music": "htdemucs_ft", "shifts": 1, "segment": 7},
 }
-DEFAULT_TIER = "fast"
+# No single DEFAULT_TIER constant: which tier a job runs at when the caller
+# doesn't pin one is now architecture-aware (backend.arch.resolve_default_tier,
+# ARCH_RUNTIME_PROFILES below) — e.g. "fast" on a VNNI x86_64 host, "balanced"
+# elsewhere, per what's actually measured to be faster on that hardware.
 
 # 4-stem (vocals/drums/bass/other) is the locked default; 6-stem
 # (+guitar/piano, htdemucs_6s) is opt-in — same STFT-split ONNX export path
@@ -87,4 +91,53 @@ TIER_RTF = {
     "fast": 0.45,
     "balanced": 0.25,
     "best": 1.0,
+}
+
+
+# Each provider entry is either a bare EP name, or an (EP name, provider
+# options dict) pair — exactly the two shapes onnxruntime's own
+# `providers=[...]` list accepts.
+ProviderSpec = str | tuple[str, dict]
+
+
+@dataclass(frozen=True)
+class RuntimeProfile:
+    tier: str  # which tier this arch defaults to when a job doesn't pin one
+    providers: tuple[ProviderSpec, ...]  # ONNX Runtime EPs to prefer, in order (backend/arch.py)
+
+
+# Architecture-aware runtime selection (backend/arch.py detects the host at
+# startup; scripts/bench_arch.py measures real-time-factor per (arch, tier)
+# so these come from measurement, not guesses — re-run it on new hardware
+# before trusting the "tier" defaults here). Every entry is a *preference*:
+# demucs_onnx.py always appends CPUExecutionProvider as the final fallback,
+# and onnxruntime itself silently skips a provider that isn't compiled into
+# the current build — so no arch or provider is ever a hard requirement.
+ARCH_RUNTIME_PROFILES: dict[str, RuntimeProfile] = {
+    # x86_64 with AVX-512 VNNI: fused int8 GEMM kernels make the "fast"
+    # (int8-quantized) model genuinely fast here, unlike the non-VNNI
+    # reference machine TIER_RTF above was measured on (see that constant's
+    # docstring — onnxruntime's plain CPU EP has no fused int8 kernel for
+    # this graph without VNNI). OpenVINO's CPU EP is what exploits VNNI.
+    "x86_64_vnni": RuntimeProfile(tier="fast", providers=("OpenVINOExecutionProvider",)),
+    # Apple Silicon / Graviton: no fused int8 path, so default to the fp32
+    # ("balanced") model, on plain CPUExecutionProvider — NOT CoreML. Both
+    # halves of that were measured, not assumed, on this graph specifically:
+    # (1) CoreML's default compute-unit selection routes onto the Neural
+    # Engine, which runs in fp16 — the STFT magnitude spectrogram's dynamic
+    # range overflows fp16, producing silent `inf` stems (bit-for-bit
+    # reproduced via DemucsONNXSeparator(providers=("CoreMLExecutionProvider",))
+    # against test_onnx_vs_oracle on this host). (2) Pinning CoreML to
+    # "CPUOnly" compute units fixes that correctness bug (~2e-4 max-abs-diff
+    # vs. the oracle) but is ~16x *slower* than just using
+    # CPUExecutionProvider directly on a clean, uncontended run (RTF 3.22 vs
+    # 0.20 on a 15s real clip) — CoreML's graph conversion/partitioning
+    # overhead on this op pattern isn't worth paying once it can't touch the
+    # GPU/ANE anyway. Net result: CoreML has no role here at all, correct or
+    # not — plain CPU wins outright.
+    "arm64": RuntimeProfile(tier="balanced", providers=()),
+    # x86_64 without VNNI, or an unrecognized arch: same fp32 default as
+    # arm64 (int8 isn't faster without fused kernels here either — same
+    # reasoning as the "fast" tier's TIER_RTF note), plain CPU EP only.
+    "default": RuntimeProfile(tier="balanced", providers=()),
 }

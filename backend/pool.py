@@ -205,6 +205,8 @@ def _copy_cached_stems(cached_job_id: str, new_job_id: str) -> None:
     cached_job = jobs.get_job(cached_job_id)
     if cached_job is None:
         raise RuntimeError(f"cache pointed at missing job {cached_job_id}")
+    if cached_job.runtime_arch is not None:
+        jobs.set_runtime_info(new_job_id, cached_job.runtime_arch, cached_job.runtime_provider, cached_job.runtime_model)
     output_dir = job_dir(new_job_id)
     output_dir.mkdir(parents=True, exist_ok=True)
     for stem in cached_job.stems:

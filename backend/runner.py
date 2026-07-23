@@ -131,6 +131,12 @@ def _main() -> None:
             jobs.update_progress(args.job_id, chunks_done=done, chunks_total=total)
 
     separator = select_separator(args.mode, args.tier, stem_count=args.stem_count)  # loads the model once
+
+    if args.job_id is not None:
+        runtime_info = separator.runtime_info()
+        if runtime_info is not None:
+            jobs.set_runtime_info(args.job_id, **runtime_info)
+
     stems = separator.separate(audio, on_chunk=on_chunk)
 
     output_dir = Path(args.output_dir)

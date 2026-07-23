@@ -108,6 +108,9 @@ class Job:
     source_sample_rate: int | None
     source_channels: int | None
     source_wav_path: str | None
+    runtime_arch: str | None
+    runtime_provider: str | None
+    runtime_model: str | None
     stems: list[Stem] = field(default_factory=list)
 
     @property
@@ -184,6 +187,9 @@ def get_job(job_id: str) -> Job | None:
         source_sample_rate=row["source_sample_rate"],
         source_channels=row["source_channels"],
         source_wav_path=row["source_wav_path"],
+        runtime_arch=row["runtime_arch"],
+        runtime_provider=row["runtime_provider"],
+        runtime_model=row["runtime_model"],
         stems=stems,
     )
 
@@ -281,6 +287,18 @@ def set_source_info(
         conn.execute(
             "UPDATE jobs SET source_codec = ?, source_bitrate = ?, source_sample_rate = ?, source_channels = ? WHERE id = ?",
             (codec, bitrate, sample_rate, channels, job_id),
+        )
+
+
+def set_runtime_info(job_id: str, arch: str, provider: str, model: str) -> None:
+    """Records which host arch bucket, ONNX Runtime execution provider, and
+    model file actually separated this job (backend.arch, separator's
+    `runtime_info()`) — surfaced in GET /jobs/{id} and the job metadata panel
+    (PRD Addendum §2.5), same idea as set_source_info for the input side."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE jobs SET runtime_arch = ?, runtime_provider = ?, runtime_model = ? WHERE id = ?",
+            (arch, provider, model, job_id),
         )
 
 

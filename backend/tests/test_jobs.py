@@ -173,6 +173,20 @@ def test_set_initial_eta_before_any_chunk_lands(db):
     assert jobs.get_job(job_id).eta_seconds == 42.5
 
 
+def test_set_runtime_info(db):
+    job_id = jobs.create_job("music", "fast", "upload", "song.mp3")
+    job = jobs.get_job(job_id)
+    assert job.runtime_arch is None
+    assert job.runtime_provider is None
+    assert job.runtime_model is None
+
+    jobs.set_runtime_info(job_id, "arm64", "CoreMLExecutionProvider", "htdemucs_core")
+    job = jobs.get_job(job_id)
+    assert job.runtime_arch == "arm64"
+    assert job.runtime_provider == "CoreMLExecutionProvider"
+    assert job.runtime_model == "htdemucs_core"
+
+
 def test_mark_from_cache(db):
     job_id = jobs.create_job("music", "fast", "upload", "song.mp3")
     assert jobs.get_job(job_id).from_cache is False

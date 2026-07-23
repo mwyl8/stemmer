@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
+from backend.arch import HostArch, detect_host_arch, resolve_providers
 from backend.config import INTRA_OP_THREADS, MODELS_DIR
 from backend.separators._stft_numpy import cac_to_complex, ispec, magnitude_cac, spec
 from backend.separators.base import Separator
@@ -52,6 +53,8 @@ class DemucsONNXSeparator(Separator):
         segment: float | None = None,
         overlap: float = 0.25,
         threads: int | None = None,
+        providers: tuple[str, ...] | None = None,
+        host_arch: HostArch | None = None,
     ):
         meta = json.loads(Path(metadata_path).read_text())
         self.sources: list[str] = meta["sources"]
@@ -61,9 +64,17 @@ class DemucsONNXSeparator(Separator):
         self.audio_channels: int = meta["audio_channels"]
         self.training_length: int = meta["training_length"]
 
+        # Architecture-aware execution provider (backend/arch.py,
+        # config.ARCH_RUNTIME_PROFILES) — a preference, never a requirement:
+        # onnxruntime silently drops a provider that isn't compiled into this
+        # build and falls back to the next one, ending in CPUExecutionProvider.
+        self._host_arch = host_arch or detect_host_arch()
+        self._model_name = Path(model_path).stem
+        resolved_providers = list(providers) if providers is not None else list(resolve_providers(self._host_arch))
+
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = threads or INTRA_OP_THREADS
-        self.session = ort.InferenceSession(str(model_path), sess_options=opts, providers=["CPUExecutionProvider"])
+        self.session = ort.InferenceSession(str(model_path), sess_options=opts, providers=resolved_providers)
 
         # The ONNX graph's input shape is fixed at training_length; a smaller
         # configured segment only controls how much of each chunk's output we
@@ -79,6 +90,15 @@ class DemucsONNXSeparator(Separator):
         passes before either one has actually run."""
         stride = max(int((1 - self.overlap) * self.segment_length), 1)
         return len(range(0, length, stride))
+
+    def runtime_info(self) -> dict[str, str]:
+        """{"arch", "provider", "model"} actually in effect — `provider` is
+        onnxruntime's own answer (session.get_providers()[0]) for which EP is
+        really running the graph, not just what we asked for, since a
+        preferred provider we requested may have been silently unavailable."""
+        active_providers = self.session.get_providers()
+        provider = active_providers[0] if active_providers else "CPUExecutionProvider"
+        return {"arch": self._host_arch.profile_key, "provider": provider, "model": self._model_name}
 
     def separate(self, audio: np.ndarray, on_chunk: Callable[[int, int], None] | None = None) -> dict[str, np.ndarray]:
         mix = np.ascontiguousarray(audio, dtype=np.float32)

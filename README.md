@@ -16,6 +16,12 @@ Selectable per job:
 - **Full** (chained) — Bandit splits the mix into speech/music/effects, then
   Demucs further splits the *music* stem into vocals/drums/bass/other. Final
   output: `speech`, `vocals`, `drums`, `bass`, `other`.
+- **Speech vs Singing** (chained) — same Bandit → Demucs chain as Full mode,
+  merged differently: `spoken_speech` (Bandit's speech stem), `sung_vocals`
+  (Demucs's vocals stem), `instruments` (every other Demucs source, summed).
+  Singing-voice-vs-speech is a known-hard, unsolved MSS problem — see
+  `scripts/eval_singing_vs_speech.py` for a measured, honestly-reported bleed
+  number on a synthetic fixture, not a claim of clean separation.
 
 ## CPU-only, and how that's met
 
@@ -175,13 +181,31 @@ Open items — not silent gaps, tracked in `docs/StemSep_PRD.md` /
   "balanced" behavior) is a measured-once comment or a documented estimate,
   not a tracked, repeatable benchmark. This is the one honest gap behind
   every other quality claim here.
-- **int8 quantization is shelved on ARM** — measured, not assumed: on the
-  reference dev machine (Apple Silicon), the int8-quantized "fast" tier
-  measures *slower* than full-precision "balanced," because ONNX Runtime's
-  CPU execution provider has no fused int8 GEMM kernel for this graph's op
-  pattern on ARM — quantization shrinks the model (58MB vs 174MB) without
-  speeding it up. Revisit once the eval harness exists to re-measure
-  properly, and possibly on x86 where fused int8 kernels are more mature.
+- **Architecture-aware runtime selection** (`backend/arch.py`,
+  `config.ARCH_RUNTIME_PROFILES`) now handles the ARM-vs-x86 int8 gap above
+  automatically: on x86_64 with AVX-512 VNNI, jobs default to the int8 "fast"
+  tier via the OpenVINO execution provider (fused int8 GEMM kernels actually
+  help there); everywhere else (Apple Silicon, Graviton, non-VNNI x86)
+  defaults to full-precision "balanced" on plain `CPUExecutionProvider`,
+  matching what was measured on the reference machine. Every choice here is
+  a preference, never a requirement — onnxruntime silently drops a provider
+  that isn't compiled into the current build. CoreML was tried for Apple
+  Silicon and measured out, not just skipped: its default compute-unit
+  selection runs this graph on the Neural Engine in fp16, which overflows to
+  `inf` on the STFT magnitude spectrogram's dynamic range (reproduced
+  directly against `test_onnx_vs_oracle.py`); pinning it to
+  `MLComputeUnits=CPUOnly` fixes that correctness bug (~2e-4 vs. the oracle)
+  but made it measurably **~16x slower** than just using
+  `CPUExecutionProvider` directly on a clean, uncontended run (RTF 3.22 vs.
+  0.20 on a 15s real clip) — CoreML's conversion/partitioning overhead isn't
+  worth paying once it can't touch the GPU/ANE anyway, so Apple Silicon gets
+  plain CPU. Run `scripts/bench_arch.py` on new hardware before trusting the
+  tier defaults there — and run it alone: separating two jobs concurrently
+  on one box (e.g. this script racing a real request) caused severe
+  CPU/memory contention in testing, at one point stalling a 900s subprocess
+  timeout's own bookkeeping for tens of minutes. Nothing here reads
+  `bench_arch.py`'s output automatically, by design (config changes stay
+  deliberate, reviewed edits).
 - **`best` tier (`htdemucs_ft`)** — deliberately unwired; `router.py` raises
   rather than silently falling back, per the "never default to `_ft`" rule.
 - **Production deploy story** — local `uv`/`npm` dev setup only (no Docker,
@@ -230,8 +254,10 @@ Manual smoke checks (hit the real pipeline end-to-end, not part of `pytest`):
 
 ```bash
 uv run python scripts/smoke.py                          # music mode on data/test.mp3
-uv run --group speech python scripts/smoke_modes.py      # music/video/full on the same clip
+uv run --group speech python scripts/smoke_modes.py      # music/video/full/singing on the same clip
 uv run python scripts/fetch_demo.py "<youtube-url>"      # real yt-dlp fetch
+uv run python scripts/bench_arch.py                      # RTF per tier on this host's arch
+uv run --group speech python scripts/eval_singing_vs_speech.py   # speech/singing bleed on a synthetic fixture
 ```
 
 `POOL_SIZE`, `TTL_SECONDS`, and the separation/purge timeouts are all

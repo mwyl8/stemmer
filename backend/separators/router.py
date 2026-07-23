@@ -12,6 +12,10 @@
 - Full mode   -> chained: Bandit first, then Demucs (at the configured
                  stem_count) on Bandit's "music" stem, merged into
                  speech + the Demucs source set (chained_sep.py).
+- Singing mode-> the same Bandit-then-Demucs chain as Full mode, but merged
+                 into spoken_speech / sung_vocals / instruments instead —
+                 "does the talking voice land in a different stem than the
+                 singing voice" (singing_sep.py).
 
 Bandit's import (and its `speech` dependency group: torch/torchaudio/
 pytorch-lightning/spafe) is deferred into the video/full branches, never at
@@ -48,6 +52,10 @@ def select_separator(mode: str, tier: str, stem_count: int = DEFAULT_STEM_COUNT)
         from backend.separators.chained_sep import ChainedSeparator
 
         return ChainedSeparator(bandit=_select_bandit(), demucs=_select_demucs(tier, stem_count))
+    if mode == "singing":
+        from backend.separators.singing_sep import SpeechVsSingingSeparator
+
+        return SpeechVsSingingSeparator(bandit=_select_bandit(), demucs=_select_demucs(tier, stem_count))
     raise NotImplementedError(f"unknown mode {mode!r}")
 
 

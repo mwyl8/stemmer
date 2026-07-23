@@ -16,6 +16,7 @@ from backend.separators.base import Separator
 from backend.separators.chained_sep import ChainedSeparator
 from backend.separators.demucs_onnx import DemucsONNXSeparator
 from backend.separators.router import select_separator
+from backend.separators.singing_sep import SpeechVsSingingSeparator
 
 
 @pytest.mark.parametrize("tier", ["fast", "balanced"])
@@ -82,6 +83,36 @@ def test_full_mode_propagates_bad_tier(monkeypatch):
     monkeypatch.setattr(router, "_select_bandit", lambda: object())
     with pytest.raises(NotImplementedError):
         select_separator("full", "best")
+
+
+def test_singing_mode_chains_bandit_and_demucs_on_configured_tier_and_stems(monkeypatch):
+    bandit_sentinel = object()
+    demucs_calls = []
+
+    def fake_select_demucs(tier, stem_count=4):
+        demucs_calls.append((tier, stem_count))
+        return f"demucs-for-{tier}-{stem_count}"
+
+    monkeypatch.setattr(router, "_select_bandit", lambda: bandit_sentinel)
+    monkeypatch.setattr(router, "_select_demucs", fake_select_demucs)
+
+    sep = select_separator("singing", "balanced")
+
+    assert isinstance(sep, SpeechVsSingingSeparator)
+    assert sep.bandit is bandit_sentinel
+    assert sep.demucs == "demucs-for-balanced-4"
+    assert demucs_calls == [("balanced", 4)]
+
+    demucs_calls.clear()
+    sep6 = select_separator("singing", "balanced", stem_count=6)
+    assert sep6.demucs == "demucs-for-balanced-6"
+    assert demucs_calls == [("balanced", 6)]
+
+
+def test_singing_mode_propagates_bad_tier(monkeypatch):
+    monkeypatch.setattr(router, "_select_bandit", lambda: object())
+    with pytest.raises(NotImplementedError):
+        select_separator("singing", "best")
 
 
 def test_unknown_mode_raises():

@@ -61,10 +61,10 @@ export default function ProgressStages({ job, skipDownload }) {
           {showEta && <span className="text-slate-400">ETA ~{formatDurationWords(job.eta_seconds)}</span>}
         </div>
 
-        {job.mode === 'full' && job.stage === 'separating' && (
+        {(job.mode === 'full' || job.mode === 'singing') && job.stage === 'separating' && (
           <p className="text-xs text-slate-500">
-            Full mode chains two separation passes (speech/music/effects, then instruments) — progress above is weighted
-            across both, so it won't reset partway through.
+            {job.mode === 'full' ? 'Full' : 'Speech vs Singing'} mode chains two separation passes (speech/music/effects,
+            then instruments) — progress above is weighted across both, so it won't reset partway through.
           </p>
         )}
       </div>

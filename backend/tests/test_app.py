@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from backend import jobs
 from backend import pool as pool_mod
 from backend.app import app
+from backend.arch import resolve_default_tier
 from backend.ingest import fetch as fetch_mod
 
 SR = 44100
@@ -98,7 +99,7 @@ def test_post_jobs_file_upload_defaults_mode_and_tier(client):
     job_id = resp.json()["job_id"]
     status = _wait_for_terminal_status(client, job_id)
     assert status["mode"] == "music"  # DEFAULT_MODE
-    assert status["tier"] == "fast"  # DEFAULT_TIER
+    assert status["tier"] == resolve_default_tier()  # arch-aware default (backend/arch.py)
 
 
 def test_post_jobs_rejects_invalid_mode(client):
@@ -321,6 +322,37 @@ def test_progress_advances_monotonically_and_chunks_never_exceed_total(client, m
             assert done <= total  # chunks_done never exceeds chunks_total
     assert seen_chunks[-1] == (total_chunks, total_chunks)
     assert seen_progress[-1] == 100
+
+
+def test_singing_mode_end_to_end(client, monkeypatch):
+    data = (0.05 * np.random.default_rng(22).standard_normal((SR, 2))).astype(np.float32)
+
+    def _fake(input_wav, output_dir, mode="singing", tier="balanced", stem_count=4, timeout=300, job_id=None):
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if job_id is not None:
+            jobs.update_progress(job_id, chunks_done=1, chunks_total=1)
+            jobs.set_runtime_info(job_id, "arm64", "CoreMLExecutionProvider", "htdemucs_core")
+        return _write_fake_stems(output_dir, ("spoken_speech", "sung_vocals", "instruments"), data)
+
+    monkeypatch.setattr(pool_mod.runner_mod, "separate_in_subprocess", _fake)
+
+    resp = client.post(
+        "/jobs",
+        files={"file": ("song.wav", _upload_bytes(seed=22), "audio/wav")},
+        data={"mode": "singing"},
+    )
+    assert resp.status_code == 201
+    job_id = resp.json()["job_id"]
+
+    status = _wait_for_terminal_status(client, job_id)
+    assert status["status"] == "done"
+    assert status["mode"] == "singing"
+    stem_names = {s["name"] for s in status["stems"]}
+    assert stem_names == {"spoken_speech", "sung_vocals", "instruments"}
+    assert status["runtime_arch"] == "arm64"
+    assert status["runtime_provider"] == "CoreMLExecutionProvider"
+    assert status["runtime_model"] == "htdemucs_core"
 
 
 def test_chained_mode_progress_is_monotonic_across_both_passes(client, monkeypatch):

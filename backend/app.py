@@ -25,7 +25,8 @@ from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
 from backend import jobs
-from backend.config import DEFAULT_MODE, DEFAULT_STEM_COUNT, DEFAULT_TIER, MAX_UPLOAD_BYTES, MODES, STEM_COUNTS, TIERS
+from backend.arch import resolve_default_tier
+from backend.config import DEFAULT_MODE, DEFAULT_STEM_COUNT, MAX_UPLOAD_BYTES, MODES, STEM_COUNTS, TIERS
 from backend.ingest.fetch import InvalidURLError, classify_platform, validate_url
 from backend.mixdown import TrackAdjustment, mix_stems
 from backend.pool import WorkerPool
@@ -118,7 +119,11 @@ async def _submit_url_job(request: Request) -> str:
 
 def _validate_mode_tier_stems(mode: str | None, tier: str | None, stem_count: str | int | None) -> tuple[str, str, int]:
     mode = mode or DEFAULT_MODE
-    tier = tier or DEFAULT_TIER
+    # Arch-aware default (backend/arch.py): what tier a job runs at when the
+    # caller doesn't pin one, e.g. int8 "fast" on a VNNI x86_64 host, fp32
+    # "balanced" elsewhere (config.ARCH_RUNTIME_PROFILES) — an explicit tier
+    # in the request always wins over this.
+    tier = tier or resolve_default_tier()
     stem_count = DEFAULT_STEM_COUNT if stem_count is None else stem_count
     if mode not in MODES:
         raise HTTPException(422, f"mode must be one of {MODES}")
@@ -157,6 +162,13 @@ def _job_summary(job: jobs.Job) -> dict:
         "source_bitrate": job.source_bitrate,
         "source_sample_rate": job.source_sample_rate,
         "source_channels": job.source_channels,
+        # Which host arch bucket / ONNX Runtime execution provider / model
+        # file actually separated this job (backend/arch.py) — null until the
+        # runner subprocess reaches that point, and always null for modes
+        # with no ONNX runtime concept yet (video mode's Bandit-only path).
+        "runtime_arch": job.runtime_arch,
+        "runtime_provider": job.runtime_provider,
+        "runtime_model": job.runtime_model,
         # Whether this job's normalized source audio is still persisted
         # (job_dir, same TTL as its stems) — gates the "A/B against the
         # original" toggle and the "re-run at a different mode/tier" action
