@@ -25,9 +25,6 @@ Selectable per job:
 
 ## CPU-only, and how that's met
 
-There's no GPU path to fall back on, so CPU performance is a first-class
-constraint, not an afterthought bolted on later:
-
 - **ONNX Runtime, quantized where it actually helps**, not PyTorch, serves
   every request (see below).
 - **Segment/overlap-add chunking** keeps memory bounded and lets long files
