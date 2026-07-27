@@ -87,6 +87,38 @@ Two changes address parts of this; a third was tried and reverted:
   **not resolved** by this round of changes; it needs a materially more
   accurate frame classifier before hard routing is safe to enable.
 
+A second knob was measured the same way and failed identically. Lengthening
+`_EXIT_DEBOUNCE_FRAMES` (from 9 toward 20, matching `_ENTER_DEBOUNCE_FRAMES`
+— making a committed "sung" decision as sticky to leave as it is to enter)
+does raise the frame classifier's own balanced accuracy on a labeled dev set
+(0.590 -> 0.700) and holds up on held-out test (0.660 -> 0.701) — see
+scripts/eval_singing_classifier.py and
+scripts/eval_singing_classifier_calibration.py. But a dedicated output-
+quality ablation at exit=9/14/20 (enter fixed at 20, everything else
+unchanged) found stem-envelope correlation — the metric this module exists
+to keep low — degrades *monotonically* with exit length on both dev (0.103
+-> 0.105 -> 0.126) and test (0.075 -> 0.086 -> 0.101): the same shape
+`_ARBITRATION_STRENGTH`'s sweep found above, on an independent axis. A
+further validity check also found the classifier-accuracy gain itself isn't
+robust past (20,20): dev balanced accuracy keeps rising to 0.756 at (40,40)
+while test swings non-monotonically (0.494 to 0.987) across the same range
+— consistent with the eval set's windows being homogeneous by construction
+(each one entirely spoken or entirely sung), which rewards *any*
+long-enough debounce for simply outlasting in-window noise, not with longer
+debounce being genuinely better.
+
+Read together: `_ARBITRATION_STRENGTH` (trusting a committed decision
+*harder*) and exit debounce (trusting it *longer* once committed) each
+measurably degrade output quality when pushed, because both amplify a
+classifier that is still wrong roughly a third of the time on unambiguous
+ground truth (see `_frame_score_and_voiced`'s docstring). **Before retuning
+either constant again, the fix has to be a more accurate frame classifier,
+not more confidence in this one** — both dimensions of "trust it more" have
+now been tried and both make output quality worse. Shipped values remain
+`_ARBITRATION_STRENGTH = 3.0`, `_ENTER_DEBOUNCE_FRAMES = 20`,
+`_EXIT_DEBOUNCE_FRAMES = 9`; this paragraph is a measurement record, not a
+call to change them.
+
 Uses its own small STFT/ISTFT pair rather than `_stft_numpy.py`'s (the
 htdemucs-oracle-matching one): that one reflect-pads to center each frame,
 which requires the pad width (n_fft // 2) to be <= the signal length — true
@@ -196,7 +228,11 @@ _HARMONY_FIT_SCALE = 0.30  # rescales the raw chroma-fraction-at-pitch-class int
 
 
 def partition_vocal_bus(
-    spoken_raw: np.ndarray, sung_raw: np.ndarray, sample_rate: int, accompaniment: np.ndarray | None = None
+    spoken_raw: np.ndarray,
+    sung_raw: np.ndarray,
+    sample_rate: int,
+    accompaniment: np.ndarray | None = None,
+    bias_override: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Splits (spoken_raw + sung_raw)'s combined STFT energy between the two
     stems with a mask that sums to 1 per time-frequency bin, biased
@@ -207,7 +243,15 @@ def partition_vocal_bus(
     vocal estimates) is optional and only powers the beat-alignment/harmony-
     fit features in `_sung_score` -- omitting it (as the unit tests do)
     falls back to the original pitch-only feature set, just with no rhythm
-    or harmony evidence available."""
+    or harmony evidence available.
+
+    `bias_override`, if given (shape (T,), matching the STFT frame count),
+    replaces `_frame_sung_bias`'s computed bias entirely instead of calling
+    it -- for eval tooling only (scripts/eval_singing_classifier_calibration.py's
+    arbitration on/off ablation: an all-0.5 override reproduces the plain,
+    unarbitrated magnitude-ratio mask exactly, per `_biased_mask`'s own
+    docstring). Production code never passes this; omitting it (the default)
+    is exactly today's behavior."""
     length = spoken_raw.shape[-1]
     spoken_stft = _stft_zero_padded(spoken_raw, N_FFT, HOP_LENGTH)
     sung_stft = _stft_zero_padded(sung_raw, N_FFT, HOP_LENGTH)
@@ -217,7 +261,10 @@ def partition_vocal_bus(
     power_sung = np.abs(sung_stft) ** 2
     raw_mask_sung = power_sung / np.maximum(power_spoken + power_sung, _EPS)
 
-    bias = _frame_sung_bias(spoken_raw, sung_raw, sample_rate, n_frames=raw_mask_sung.shape[-1], accompaniment=accompaniment)
+    if bias_override is not None:
+        bias = bias_override
+    else:
+        bias = _frame_sung_bias(spoken_raw, sung_raw, sample_rate, n_frames=raw_mask_sung.shape[-1], accompaniment=accompaniment)
     mask_sung = _biased_mask(raw_mask_sung, bias)
     mask_spoken = 1.0 - mask_sung
 
@@ -250,13 +297,36 @@ def _frame_sung_bias(
 ) -> np.ndarray:
     """Per-frame sung-likelihood in [0, 1], aligned to `partition_vocal_bus`'s
     STFT frame grid, smoothed with hysteresis so the decision doesn't
-    chatter frame to frame. Defaults to a single stem (spoken, i.e. 0.0
-    everywhere) when the clip is too short for the pitch tracker's analysis
-    window -- real jobs are always many seconds long, but this module's unit
-    tests exercise it with few-hundred-sample fakes. (Not 0.5: a neutral
-    bias reproduces the plain, unarbitrated magnitude-ratio mask, which is
-    exactly the "50/50 split of one voice" bug this module exists to avoid
-    -- an uncertain default should pick a stem, not divide the bin.)
+    chatter frame to frame. See `_frame_score_and_voiced` for the pre-
+    hysteresis score/voiced computation this wraps."""
+    score, voiced = _frame_score_and_voiced(spoken_raw, sung_raw, sample_rate, n_frames, accompaniment)
+    return _hysteresis_smooth(score, voiced)
+
+
+def _frame_score_and_voiced(
+    spoken_raw: np.ndarray,
+    sung_raw: np.ndarray,
+    sample_rate: int,
+    n_frames: int,
+    accompaniment: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The pre-hysteresis half of `_frame_sung_bias`: per-frame [0, 1] sung-
+    likelihood score and voiced mask, aligned to `partition_vocal_bus`'s STFT
+    frame grid -- factored out (rather than inlined in `_frame_sung_bias`) so
+    eval tooling (scripts/eval_singing_classifier.py) can inspect the raw
+    score independently of `_hysteresis_smooth`'s state machine, without
+    duplicating this function's logic. `_frame_sung_bias` itself is
+    unchanged behaviorally by this split -- it's exactly
+    `_hysteresis_smooth(*_frame_score_and_voiced(...))`.
+
+    Defaults to a single stem (spoken, i.e. score/voiced both all-zero, which
+    `_hysteresis_smooth` turns into 0.0 == spoken everywhere) when the clip is
+    too short for the pitch tracker's analysis window -- real jobs are always
+    many seconds long, but this module's unit tests exercise it with
+    few-hundred-sample fakes. (Not a neutral 0.5 score: that would reproduce
+    the plain, unarbitrated magnitude-ratio mask, which is exactly the
+    "50/50 split of one voice" bug this module exists to avoid -- an
+    uncertain default should pick a stem, not divide the bin.)
 
     `accompaniment`, if given, feeds `_sung_score`'s beat-alignment/harmony-
     fit features (see that function) -- both computed from the non-vocal
@@ -286,7 +356,7 @@ def _frame_sung_bias(
     different, still-open calibration/feature problem."""
     mono = np.mean(spoken_raw + sung_raw, axis=0).astype(np.float64)
     if mono.shape[-1] < _PITCH_FRAME_LENGTH:
-        return np.zeros(n_frames, dtype=np.float64)
+        return np.zeros(n_frames, dtype=np.float64), np.zeros(n_frames, dtype=bool)
 
     f0, _voiced_flag, voiced_prob = librosa.pyin(
         mono,
@@ -308,7 +378,7 @@ def _frame_sung_bias(
     score = _sung_score(f0, voiced_prob, frame_rate_hz, beat_alignment, harmony_fit)
     score = _match_length(score, n_frames)
     voiced = _match_length(~np.isnan(f0), n_frames)
-    return _hysteresis_smooth(score, voiced)
+    return score, voiced
 
 
 def _sung_score(
