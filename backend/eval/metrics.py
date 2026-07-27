@@ -9,11 +9,20 @@ Singing mode's spoken_speech/sung_vocals stems separate a known synthetic
 mixture — see that script for why the fixture is synthetic, and its printed
 report for why the numbers should be read as a regression check, not a
 solved-problem claim.
+
+`cross_stem_leakage_fraction`/`window_rms_ratio` below are a second, blunter
+measure that doesn't need ground truth at all — just two stems that are
+*supposed* to be mutually exclusive in time (like spoken_speech vs.
+sung_vocals). Used by scripts/eval_singing_bleed_thriller.py to quantify the
+bleed bug directly on a real cached job (no synthetic fixture involved),
+before vs. after _vocal_partition.py's fix.
 """
 
 from __future__ import annotations
 
 import numpy as np
+
+_RMS_EPS = 1e-10
 
 
 def project_two_sources(
@@ -55,3 +64,73 @@ def sdr_sir_sar(estimate: np.ndarray, target: np.ndarray, interferer: np.ndarray
         "sir_db": _db(target_energy, interferer_energy),
         "sar_db": _db(target_energy + interferer_energy, artifact_energy),
     }
+
+
+def cross_stem_leakage_fraction(
+    stem_a: np.ndarray,
+    stem_b: np.ndarray,
+    sample_rate: int,
+    frame_seconds: float = 0.5,
+    active_ratio: float = 0.1,
+    start_seconds: float | None = None,
+    end_seconds: float | None = None,
+) -> float:
+    """Fraction of `frame_seconds` windows where BOTH stems are "active" at
+    once — the direct measure of "did the two voices bleed into each
+    other's stem". A window counts as active for a stem when that window's
+    RMS is at least `active_ratio` of *that same stem's own peak RMS* across
+    the whole clip (so a naturally quiet stem — e.g. sparse dialogue — isn't
+    unfairly counted as silent throughout). 0.0 means the two stems never
+    overlap in time; 1.0 means they're active together everywhere.
+
+    `start_seconds`/`end_seconds`, if given, restrict which windows are
+    *counted* toward the fraction — but the "own peak RMS" each window is
+    compared against is still measured over the full `stem_a`/`stem_b`
+    arrays passed in. Passing already-sliced arrays instead (and no
+    start/end) silently changes the denominator to that slice's own local
+    peak, which washes out any real difference a fix makes to a specific
+    window — every slice trivially has *some* frame at its own local peak,
+    so the fraction stops responding to what actually changed there."""
+    frame_len = max(int(frame_seconds * sample_rate), 1)
+    rms_a = _frame_rms(stem_a, frame_len)
+    rms_b = _frame_rms(stem_b, frame_len)
+    n = min(len(rms_a), len(rms_b))
+    if n == 0:
+        return 0.0
+    rms_a, rms_b = rms_a[:n], rms_b[:n]
+    active_a = rms_a >= active_ratio * max(float(rms_a.max()), _RMS_EPS)
+    active_b = rms_b >= active_ratio * max(float(rms_b.max()), _RMS_EPS)
+    both_active = active_a & active_b
+    start_frame = int((start_seconds * sample_rate) / frame_len) if start_seconds is not None else 0
+    end_frame = int((end_seconds * sample_rate) / frame_len) if end_seconds is not None else n
+    windowed = both_active[max(start_frame, 0) : min(end_frame, n)]
+    return float(np.mean(windowed)) if windowed.size else 0.0
+
+
+def window_rms_ratio(target: np.ndarray, other: np.ndarray, sample_rate: int, start_seconds: float, end_seconds: float) -> float:
+    """RMS(target) / RMS(other) over [start_seconds, end_seconds) — how many
+    times louder the stem that *should* be active in this window is than the
+    stem that shouldn't be. Higher is better; 1.0 means the two stems are
+    equally loud in a window that should belong to only one of them."""
+    a = _slice_seconds(target, sample_rate, start_seconds, end_seconds)
+    b = _slice_seconds(other, sample_rate, start_seconds, end_seconds)
+    return float(_rms(a) / max(_rms(b), _RMS_EPS))
+
+
+def _frame_rms(stem: np.ndarray, frame_len: int) -> np.ndarray:
+    mono = np.mean(stem, axis=0) if stem.ndim > 1 else stem
+    n_frames = mono.shape[-1] // frame_len
+    if n_frames == 0:
+        return np.array([_rms(mono)])
+    trimmed = mono[: n_frames * frame_len].reshape(n_frames, frame_len)
+    return np.sqrt(np.mean(trimmed.astype(np.float64) ** 2, axis=1))
+
+
+def _slice_seconds(stem: np.ndarray, sample_rate: int, start_seconds: float, end_seconds: float) -> np.ndarray:
+    start = max(int(start_seconds * sample_rate), 0)
+    end = min(int(end_seconds * sample_rate), stem.shape[-1])
+    return stem[..., start:end]
+
+
+def _rms(x: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(x.astype(np.float64) ** 2))) if x.size else 0.0

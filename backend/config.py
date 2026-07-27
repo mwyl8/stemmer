@@ -51,7 +51,27 @@ PURGE_INTERVAL_SECONDS = int(os.environ.get("STEMMER_PURGE_INTERVAL_SECONDS", 30
 # — stems cached under v2 or earlier were each scaled by their own peak,
 # which destroys inter-stem balance (drums vs. vocals), so they must not be
 # served as cache hits anymore.
-PIPELINE_VERSION = 3
+#
+# v4: Speech-vs-Singing mode's spoken_speech/sung_vocals no longer pass
+# Bandit's and Demucs's raw, independent estimates straight through — those
+# two stems could (and did, e.g. the cached Thriller job's 5:50-6:30) both
+# claim the same vocal energy at once. singing_sep.py now runs them through
+# _vocal_partition.py's Wiener-style mask, which sums the two stems to 1 per
+# time-frequency bin — stems cached under v3 or earlier still have the
+# double-counted bleed and must not be served as cache hits.
+#
+# v5: v4's frame-level spoken/sung arbitration was calibrated against clean
+# synthetic tones only, then measurably regressed a verified real-audio
+# window (Thriller's sung verse, 11.87x -> 8.30x, below the required 12x
+# floor) — real pYIN confidence on a dense, produced mix runs much lower
+# than on synthetic fixtures. _vocal_partition.py now: (1) never lets an
+# unvoiced frame drive a spoken/sung transition (absence of a pitch estimate
+# isn't evidence either way), (2) requires a longer run of sustained
+# evidence to *enter* "sung" than to *exit* it, and (3) has hysteresis
+# thresholds recalibrated against real, not synthetic, audio. Stems cached
+# under v4 still carry that regression and must not be served as cache
+# hits.
+PIPELINE_VERSION = 5
 
 MODES = ("music", "video", "full", "singing", "karaoke")
 DEFAULT_MODE = "music"

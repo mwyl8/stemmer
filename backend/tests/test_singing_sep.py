@@ -84,9 +84,15 @@ def test_output_is_spoken_speech_sung_vocals_and_summed_instruments():
     result = sep.separate(mixture)
 
     assert set(result.keys()) == {"spoken_speech", "sung_vocals", "instruments"}
-    np.testing.assert_array_equal(result["spoken_speech"], np.full((2, 100), 0.1, dtype=np.float32))
-    np.testing.assert_array_equal(result["sung_vocals"], np.full((2, 100), 1.0, dtype=np.float32))
-    # instruments = drums(2.0) + bass(3.0) + other(4.0), summed
+    # spoken_speech and sung_vocals no longer pass Bandit's/Demucs's raw
+    # estimates straight through -- _vocal_partition.py splits their combined
+    # energy so the two stems partition it instead of each claiming all of
+    # it (see test_vocal_partition.py for that invariant in detail). Here,
+    # just check the combined vocal energy is preserved: 0.1 (bandit speech)
+    # + 1.0 (demucs vocals) = 1.1.
+    combined = result["spoken_speech"].astype(np.float64) + result["sung_vocals"].astype(np.float64)
+    np.testing.assert_allclose(combined, np.full((2, 100), 1.1), atol=1e-3)
+    # instruments = drums(2.0) + bass(3.0) + other(4.0), summed -- untouched by the partition fix
     np.testing.assert_allclose(result["instruments"], np.full((2, 100), 9.0, dtype=np.float32))
 
 
