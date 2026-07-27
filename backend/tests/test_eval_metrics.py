@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from backend.eval.metrics import cross_stem_leakage_fraction, sdr_sir_sar, window_rms_ratio
+from backend.eval.metrics import cross_stem_leakage_fraction, sdr_sir_sar, stem_envelope_correlation, window_rms_ratio
 
 SR = 8000
 T = np.arange(SR) / SR
@@ -146,3 +146,50 @@ def test_window_rms_ratio_is_one_when_equally_loud():
     other = _stereo_bursts([(0.0, 10.0)], duration, SR, amplitude=1.0)
     ratio = window_rms_ratio(target, other, SR, start_seconds=2.0, end_seconds=8.0)
     assert ratio == pytest.approx(1.0, rel=1e-6)
+
+
+def _envelope_modulated_tone(envelope: np.ndarray, freq: float, sr: int) -> np.ndarray:
+    """A stereo tone at `freq` amplitude-modulated by `envelope` (one sample
+    of envelope per output sample) -- stands in for one half of a single
+    performance spectrally split into a different carrier band."""
+    t = np.arange(len(envelope)) / sr
+    mono = (envelope * np.sin(2 * np.pi * freq * t)).astype(np.float64)
+    return np.stack([mono, mono], axis=0)
+
+
+def test_stem_envelope_correlation_high_when_one_performance_is_split_spectrally():
+    duration = 10.0
+    sr = SR
+    n = int(duration * sr)
+    rng = np.random.default_rng(3)
+    # A single shared syllable-rate envelope (slow, ~4Hz-ish random walk of
+    # bursts) driving two *different* carrier frequencies -- the spectral-
+    # split failure mode: same performance, different frequency content.
+    shared_envelope = np.repeat(rng.uniform(0.0, 1.0, size=40), n // 40 + 1)[:n]
+    stem_a = _envelope_modulated_tone(shared_envelope, freq=220.0, sr=sr)
+    stem_b = _envelope_modulated_tone(shared_envelope, freq=880.0, sr=sr)
+
+    correlation = stem_envelope_correlation(stem_a, stem_b, sr, start_seconds=0.0, end_seconds=duration)
+    assert correlation > 0.8
+
+
+def test_stem_envelope_correlation_low_for_independent_sources():
+    duration = 10.0
+    sr = SR
+    n = int(duration * sr)
+    rng = np.random.default_rng(4)
+    envelope_a = np.repeat(rng.uniform(0.0, 1.0, size=40), n // 40 + 1)[:n]
+    envelope_b = np.repeat(rng.uniform(0.0, 1.0, size=40), n // 40 + 1)[:n]
+    stem_a = _envelope_modulated_tone(envelope_a, freq=220.0, sr=sr)
+    stem_b = _envelope_modulated_tone(envelope_b, freq=880.0, sr=sr)
+
+    correlation = stem_envelope_correlation(stem_a, stem_b, sr, start_seconds=0.0, end_seconds=duration)
+    assert abs(correlation) < 0.5
+
+
+def test_stem_envelope_correlation_is_zero_for_true_silence():
+    duration = 10.0
+    stem_a = _stereo_bursts([(0.0, 10.0)], duration, SR, amplitude=1.0)
+    silent = np.zeros_like(stem_a)
+    correlation = stem_envelope_correlation(stem_a, silent, SR, start_seconds=0.0, end_seconds=duration)
+    assert correlation == 0.0

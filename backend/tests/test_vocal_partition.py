@@ -73,18 +73,75 @@ def test_biased_mask_always_stays_in_zero_one_and_complements_exactly():
     np.testing.assert_allclose(mask_sung + mask_spoken, 1.0)
 
 
-def test_short_audio_uses_neutral_bias_and_does_not_crash():
+def test_biased_mask_moves_toward_the_committed_decision_but_does_not_override_it():
+    # A committed decision nudges a disagreeing raw ratio toward the decided
+    # side, but does not fully override it at the current
+    # _ARBITRATION_STRENGTH=3.0 -- raising it to force "nearly all" of a
+    # disagreeing bin's energy to the decided stem was tried and reverted
+    # (see that constant's docstring): a held-out real-audio window caught
+    # it regressing a verified baseline, worse the higher the strength. This
+    # documents the current, known-partial behavior rather than the
+    # aspirational "dominates" one.
+    raw_mask_sung = np.array([[[0.9]]])  # raw ratio favors "sung"
+    neutral = vp._biased_mask(raw_mask_sung, np.array([0.5]))[0, 0, 0]
+    committed_spoken = vp._biased_mask(raw_mask_sung, np.array([0.0]))[0, 0, 0]
+    assert committed_spoken < neutral  # moved toward spoken...
+    assert committed_spoken > 0.1  # ...but a strongly disagreeing raw ratio still keeps a real share
+
+
+def test_short_audio_defaults_to_a_single_stem_not_a_neutral_split():
     # Shorter than _PITCH_FRAME_LENGTH -- must skip librosa.pyin entirely
     # rather than crash on too-short input (this is exactly what the fast
-    # test_singing_sep.py fakes exercise: 100-sample arrays).
+    # test_singing_sep.py fakes exercise: 100-sample arrays). The fallback
+    # must default to a single stem (spoken), not the neutral 0.5 that
+    # reproduces the plain, unarbitrated magnitude-ratio mask -- that
+    # neutral default is exactly the "50/50 split of one voice" bug.
     spoken_raw = np.full((2, 100), 0.1, dtype=np.float32)
     sung_raw = np.full((2, 100), 1.0, dtype=np.float32)
 
-    spoken, sung = vp.partition_vocal_bus(spoken_raw, sung_raw, SR)
+    bias = vp._frame_sung_bias(spoken_raw, sung_raw, SR, n_frames=5)
+    np.testing.assert_array_equal(bias, np.zeros(5))
 
+    spoken, sung = vp.partition_vocal_bus(spoken_raw, sung_raw, SR)
     assert spoken.shape == (2, 100)
     assert sung.shape == (2, 100)
     assert np.all(np.isfinite(spoken)) and np.all(np.isfinite(sung))
+
+    # The single-stem ("spoken") default should shift *some* energy toward
+    # spoken relative to the neutral-0.5 fallback it replaced -- even though
+    # sung_raw's raw amplitude is ~10x spoken_raw's here, so the raw
+    # magnitude ratio alone still wins this bin at the current, reverted
+    # _ARBITRATION_STRENGTH (see that constant's docstring: a stronger
+    # override was tried and rolled back after regressing real audio).
+    raw_mask_sung = np.array([[[0.99]]])  # close to what this DC-ish input actually produces
+    mask_sung_neutral = vp._biased_mask(raw_mask_sung, np.array([0.5]))[0, 0, 0]
+    mask_sung_spoken_default = vp._biased_mask(raw_mask_sung, np.array([0.0]))[0, 0, 0]
+    assert mask_sung_spoken_default < mask_sung_neutral
+
+
+def test_frame_sung_bias_with_accompaniment_does_not_crash_and_stays_in_range():
+    duration = 3.0
+    spoken_raw = _tone(180.0, duration=duration, amplitude=0.3)
+    sung_raw = _tone(440.0, duration=duration, amplitude=0.6)
+    accompaniment = _tone(220.0, duration=duration, amplitude=0.4)  # stand-in instrument bed
+
+    n_frames = 50
+    bias = vp._frame_sung_bias(spoken_raw, sung_raw, SR, n_frames=n_frames, accompaniment=accompaniment)
+    assert bias.shape == (n_frames,)
+    assert np.all(np.isfinite(bias))
+    assert np.all((bias >= 0.0) & (bias <= 1.0))
+
+
+def test_rolling_trailing_max_holds_a_spike_forward_not_backward():
+    x = np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+    held = vp._rolling_trailing_max(x, window=3)
+    np.testing.assert_array_equal(held, [0.0, 0.0, 1.0, 1.0, 1.0, 0.0])
+
+
+def test_match_length_axis_pads_and_truncates_along_given_axis():
+    arr = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    np.testing.assert_array_equal(vp._match_length_axis(arr, 5, axis=1), [[1.0, 2.0, 3.0, 3.0, 3.0], [4.0, 5.0, 6.0, 6.0, 6.0]])
+    np.testing.assert_array_equal(vp._match_length_axis(arr, 2, axis=1), [[1.0, 2.0], [4.0, 5.0]])
 
 
 def test_hysteresis_smooth_does_not_chatter_on_noisy_borderline_score():

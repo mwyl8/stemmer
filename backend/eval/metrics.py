@@ -16,6 +16,12 @@ measure that doesn't need ground truth at all — just two stems that are
 sung_vocals). Used by scripts/eval_singing_bleed_thriller.py to quantify the
 bleed bug directly on a real cached job (no synthetic fixture involved),
 before vs. after _vocal_partition.py's fix.
+
+`stem_envelope_correlation` distinguishes the two ways "both stems active at
+once" can happen, which `cross_stem_leakage_fraction` alone cannot: one
+shared performance split spectrally across both stems (high envelope
+correlation — a bug) vs. two genuinely different, independently-modulated
+sources that merely co-occur (low correlation — not a bug).
 """
 
 from __future__ import annotations
@@ -105,6 +111,52 @@ def cross_stem_leakage_fraction(
     end_frame = int((end_seconds * sample_rate) / frame_len) if end_seconds is not None else n
     windowed = both_active[max(start_frame, 0) : min(end_frame, n)]
     return float(np.mean(windowed)) if windowed.size else 0.0
+
+
+def stem_envelope_correlation(
+    stem_a: np.ndarray,
+    stem_b: np.ndarray,
+    sample_rate: int,
+    start_seconds: float,
+    end_seconds: float,
+    frame_seconds: float = 0.05,
+) -> float:
+    """Pearson correlation, over [start_seconds, end_seconds), between
+    `stem_a` and `stem_b`'s short-frame RMS *envelopes* -- not the raw
+    waveforms, and not `cross_stem_leakage_fraction`'s coarse on/off co-
+    activity check.
+
+    The failure mode this exists to catch: a single vocal performance
+    getting divided *spectrally* between two stems (one keeps the
+    consonant/formant energy, the other the tonal/harmonic energy) rather
+    than being routed whole to one of them. Both halves of a spectral split
+    rise and fall in lockstep with the same syllables and notes, so their
+    envelopes correlate strongly (>0.8 in practice) even though the raw
+    waveforms look quite different (different frequency content) -- exactly
+    the case `cross_stem_leakage_fraction` cannot distinguish from two
+    genuinely different voices that simply happen to co-occur, since it only
+    checks whether both stems are "active" in a window, not whether their
+    activity is *the same event*. Two independent sources active in the same
+    window (real co-occurrence, not duplication) have independently
+    modulated envelopes and correlate weakly. Frame size defaults to 50ms --
+    fine enough to track syllable-rate envelope changes, coarse enough to be
+    a stable statistic (unlike sample-rate raw cross-correlation, which is
+    dominated by phase/frequency mismatch between the two spectral halves).
+
+    Returns 0.0 (no evidence of duplication) if either envelope is constant
+    over the window (e.g. true silence), since Pearson correlation is
+    undefined there.
+    """
+    frame_len = max(int(frame_seconds * sample_rate), 1)
+    env_a = _frame_rms(_slice_seconds(stem_a, sample_rate, start_seconds, end_seconds), frame_len)
+    env_b = _frame_rms(_slice_seconds(stem_b, sample_rate, start_seconds, end_seconds), frame_len)
+    n = min(len(env_a), len(env_b))
+    if n < 2:
+        return 0.0
+    env_a, env_b = env_a[:n], env_b[:n]
+    if env_a.std() < _RMS_EPS or env_b.std() < _RMS_EPS:
+        return 0.0
+    return float(np.clip(np.corrcoef(env_a, env_b)[0, 1], -1.0, 1.0))
 
 
 def window_rms_ratio(target: np.ndarray, other: np.ndarray, sample_rate: int, start_seconds: float, end_seconds: float) -> float:

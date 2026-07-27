@@ -71,7 +71,29 @@ PURGE_INTERVAL_SECONDS = int(os.environ.get("STEMMER_PURGE_INTERVAL_SECONDS", 30
 # thresholds recalibrated against real, not synthetic, audio. Stems cached
 # under v4 still carry that regression and must not be served as cache
 # hits.
-PIPELINE_VERSION = 5
+#
+# v7 (v6 was cached, mid-investigation, against code that got reverted
+# before shipping -- bumped again so that stale v6 cache entries, which
+# reflect a since-reverted _ARBITRATION_STRENGTH change, aren't served):
+# investigated a report that one voice (job c226c717..., 5:20-6:30) could be
+# split spectrally between spoken_speech/sung_vocals rather than routed to
+# one of them. _vocal_partition.py's too-short-audio fallback now defaults
+# to a single stem instead of a neutral 50/50 split, and _sung_score gets
+# beat-grid-alignment/harmony-fit features (from the accompaniment bus)
+# that don't depend on pYIN's confidence, which collapses on a dense mix --
+# both cheap, both non-harmful, but neither decisively fixes the report. A
+# third change, raising _ARBITRATION_STRENGTH so a committed decision
+# overrides a disagreeing raw ratio, was tried and reverted: held-out
+# validation (a window never used to tune anything) caught it regressing
+# the verified Price-monologue window, and a controlled sweep showed the
+# regression is monotonic with no offsetting improvement to the reported
+# window's stem-envelope correlation at any strength tested -- see
+# _ARBITRATION_STRENGTH's own comment. The original bleed report is NOT
+# resolved by v7; it needs a materially more accurate frame classifier
+# before harder routing is safe. Stems cached under v5 or earlier still
+# carry the original double-counting bug fixed at v4/v5 and must not be
+# served as cache hits either.
+PIPELINE_VERSION = 7
 
 MODES = ("music", "video", "full", "singing", "karaoke")
 DEFAULT_MODE = "music"

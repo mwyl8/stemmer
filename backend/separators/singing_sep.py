@@ -62,7 +62,9 @@ class SpeechVsSingingSeparator(Separator):
         bandit_stems, demucs_stems = run_chain(self.bandit, self.demucs, audio, MUSIC_STEM_NAME, on_chunk)
         instrument_sources = [demucs_stems[name] for name in demucs_stems if name != _DEMUCS_VOCAL_SOURCE]
         instruments = np.sum(instrument_sources, axis=0).astype(np.float32)
-        spoken, sung = partition_vocal_bus(bandit_stems["speech"], demucs_stems[_DEMUCS_VOCAL_SOURCE], MUSIC_SAMPLE_RATE)
+        spoken, sung = partition_vocal_bus(
+            bandit_stems["speech"], demucs_stems[_DEMUCS_VOCAL_SOURCE], MUSIC_SAMPLE_RATE, accompaniment=instruments
+        )
         return {
             SPOKEN_STEM_NAME: spoken,
             SUNG_STEM_NAME: sung,

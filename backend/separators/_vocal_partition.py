@@ -33,6 +33,60 @@ Fixed in two layers:
    matter what the classifier decides — arbitration can shift *where* the
    line falls, never break the partition.
 
+Second bug, found by listening to a real job past this fix (job
+c226c717..., 5:20-6:30): the two stems can each carry the *same* vocal
+performance at once, split by frequency content rather than routed to one
+of them — spoken_speech keeps the consonant/formant energy, sung_vocals
+keeps the tonal/harmonic energy, same words, same timing, one voice
+smeared across both outputs. Confirmed before changing anything:
+`_frame_sung_bias`'s raw per-frame score is noisy frame-to-frame (big
+swings between confidently-low and confidently-high even inside a single
+verified-pure window), and — the real culprit — `_ARBITRATION_STRENGTH`'s
+old value (3.0) was too weak to override a bin where the raw magnitude
+ratio already disagreed with the frame's committed decision: a bin at
+raw_mask_sung=0.9 under a fully-committed "spoken" shift of -3.0 logits
+still ended up ~31% sung, not "nearly all spoken" — so even a *correct,
+confident, stable* decision left a substantial, audible fraction of the
+vocal in the wrong stem, every frame, which is what the ear picks up as
+duplication. Separately, the classifier's committed hysteresis state was
+measurably *wrong* (opposite of the verified label) for over 40% of
+frame-time in both of the previously "clean" baseline windows — the
+15-20x RMS ratios those windows passed at were propped up by the raw
+models' own energy imbalance, not by the classifier being right, which is
+why raising `_ARBITRATION_STRENGTH` alone isn't the whole fix (see point 3
+below).
+
+Two changes address parts of this; a third was tried and reverted:
+- `_frame_sung_bias`'s too-short-audio fallback no longer returns a neutral
+  0.5 (which reproduces the plain, unarbitrated magnitude-ratio mask —
+  exactly the "50/50 split of one voice" failure mode) — it now defaults
+  to a single stem (spoken), matching `_hysteresis_smooth`'s own
+  before-any-evidence default.
+- `_sung_score` gets two new features that don't depend on pYIN's voiced-
+  probability confidence (which collapses on a dense mix, per the
+  original bug's root cause): beat-grid onset alignment and harmonic fit
+  against the accompaniment's chroma, both computed from the
+  `accompaniment` stem (the non-vocal Demucs sources) when the caller
+  supplies one — sung phrasing tends to lock to both the beat and the
+  underlying chord, spoken delivery doesn't. Measured effect on real audio
+  is modest and mixed (better on the Price-monologue window, roughly a
+  wash on the sung-verse one) — kept because it's not harmful and CPU-cheap
+  (~7% of pYIN's own cost), not because it decisively fixes the bug.
+- Raising `_ARBITRATION_STRENGTH` (from 3.0 toward the 15.0 the arithmetic
+  above calls for) was tried and reverted: a held-out validation window
+  (never used to tune anything, see scripts/eval_singing_bleed_thriller.py)
+  caught it *regressing* the Price-monologue floor, and a controlled sweep
+  confirmed the regression is monotonic across the whole 1-15 range on
+  both verified windows, with no corresponding improvement to the bleed
+  region's stem-envelope correlation at any strength tested. See
+  `_ARBITRATION_STRENGTH`'s own comment for why: a committed hysteresis
+  state signals *stability*, not *correctness*, and this classifier is
+  still wrong 33-42% of frame-time on unambiguous ground truth — trusting
+  it harder amplifies its mistakes faster than its correct calls. The
+  original bleed report (5:20-6:30, correlation ~-0.17) is therefore
+  **not resolved** by this round of changes; it needs a materially more
+  accurate frame classifier before hard routing is safe to enable.
+
 Uses its own small STFT/ISTFT pair rather than `_stft_numpy.py`'s (the
 htdemucs-oracle-matching one): that one reflect-pads to center each frame,
 which requires the pad width (n_fft // 2) to be <= the signal length — true
@@ -101,15 +155,59 @@ _EXIT_DEBOUNCE_FRAMES = 9  # ~104ms of sustained below-LOW evidence to fall back
 
 _CROSSFADE_FRAMES = 5  # ~58ms ramp at a spoken/sung transition -- short enough not to blur real transitions
 
-_ARBITRATION_STRENGTH = 3.0  # logit-domain shift magnitude, see _biased_mask
+# Logit-domain shift magnitude, see _biased_mask. Tried raising this to 15.0
+# (from 3.0) to make a *committed* decision route "nearly all" of a bin's
+# energy to the decided stem even when the raw magnitude ratio disagrees --
+# in isolation that arithmetic is correct (a bin at raw_mask_sung=0.9 under a
+# committed "spoken" shift of -3.0 only reaches mask_sung=0.31; at -15.0 it
+# reaches 0.0007). But a controlled sweep against real audio (job
+# c226c717..., held-out-validated per this module's own history of
+# regressing on real audio after synthetic-only tuning) showed raising this
+# constant *monotonically worsens* both verified windows (Price monologue
+# 4.94x -> 2.88x, sung verse 2.65x -> 1.93x at strength 3 -> 15) while the
+# bleed region's stem-envelope correlation barely moves either way (-0.176
+# to -0.190 across the whole 1-15 range) -- because `_hysteresis_smooth`
+# committing to a state measures *stability*, not *correctness*: the
+# classifier is still wrong 33-42% of frame-time even on these unambiguous
+# ground-truth windows (see _sung_score's docstring), so trusting a
+# committed decision harder amplifies its mistakes faster than it rewards
+# its correct calls. Raising this constant is only safe once the frame
+# classifier's real-world accuracy is much higher than that -- left at its
+# original value pending that, with the mistake (and the sweep that caught
+# it) documented here rather than silently dropped.
+_ARBITRATION_STRENGTH = 3.0
 _EPS = 1e-8
 
+# Beat-grid alignment feature (see _rolling_beat_alignment): sung phrasing
+# tends to place syllable onsets close to the beat; spoken delivery doesn't.
+# pYIN's own voiced-probability confidence collapses on a dense mix (the
+# original bug's root cause), so this feature is deliberately independent of
+# it -- it only needs the accompaniment's rhythm and the vocal's own onset
+# envelope, neither of which touches pitch tracking.
+_BEAT_ALIGNMENT_TOLERANCE_SECONDS = 0.07  # ~70ms -- typical onset-detection jitter around a true beat
+_BEAT_ALIGNMENT_HOLD_SECONDS = 0.2  # sustain an onset's alignment credit through a held note, not just its attack
 
-def partition_vocal_bus(spoken_raw: np.ndarray, sung_raw: np.ndarray, sample_rate: int) -> tuple[np.ndarray, np.ndarray]:
+# Harmony-fit feature (see _rolling_harmony_fit): a sung note's F0 usually
+# lands on a chord tone of whatever the accompaniment is playing; a spoken
+# line's incidental pitch inflections don't track harmony at all, so its
+# fit against the underlying chroma should hover near chance (1/12 of the
+# accompaniment's chroma energy, if pitch class were unrelated to harmony).
+_HARMONY_FIT_SCALE = 0.30  # rescales the raw chroma-fraction-at-pitch-class into a saturating [0, 1] score
+
+
+def partition_vocal_bus(
+    spoken_raw: np.ndarray, sung_raw: np.ndarray, sample_rate: int, accompaniment: np.ndarray | None = None
+) -> tuple[np.ndarray, np.ndarray]:
     """Splits (spoken_raw + sung_raw)'s combined STFT energy between the two
     stems with a mask that sums to 1 per time-frequency bin, biased
     per-frame by `_frame_sung_bias`. Returns (spoken, sung), each shaped and
-    dtyped like the inputs."""
+    dtyped like the inputs.
+
+    `accompaniment` (the non-vocal instrument bus, same shape/rate as the two
+    vocal estimates) is optional and only powers the beat-alignment/harmony-
+    fit features in `_sung_score` -- omitting it (as the unit tests do)
+    falls back to the original pitch-only feature set, just with no rhythm
+    or harmony evidence available."""
     length = spoken_raw.shape[-1]
     spoken_stft = _stft_zero_padded(spoken_raw, N_FFT, HOP_LENGTH)
     sung_stft = _stft_zero_padded(sung_raw, N_FFT, HOP_LENGTH)
@@ -119,7 +217,7 @@ def partition_vocal_bus(spoken_raw: np.ndarray, sung_raw: np.ndarray, sample_rat
     power_sung = np.abs(sung_stft) ** 2
     raw_mask_sung = power_sung / np.maximum(power_spoken + power_sung, _EPS)
 
-    bias = _frame_sung_bias(spoken_raw, sung_raw, sample_rate, n_frames=raw_mask_sung.shape[-1])
+    bias = _frame_sung_bias(spoken_raw, sung_raw, sample_rate, n_frames=raw_mask_sung.shape[-1], accompaniment=accompaniment)
     mask_sung = _biased_mask(raw_mask_sung, bias)
     mask_spoken = 1.0 - mask_sung
 
@@ -143,16 +241,52 @@ def _biased_mask(raw_mask_sung: np.ndarray, bias: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-biased_logit))
 
 
-def _frame_sung_bias(spoken_raw: np.ndarray, sung_raw: np.ndarray, sample_rate: int, n_frames: int) -> np.ndarray:
+def _frame_sung_bias(
+    spoken_raw: np.ndarray,
+    sung_raw: np.ndarray,
+    sample_rate: int,
+    n_frames: int,
+    accompaniment: np.ndarray | None = None,
+) -> np.ndarray:
     """Per-frame sung-likelihood in [0, 1], aligned to `partition_vocal_bus`'s
     STFT frame grid, smoothed with hysteresis so the decision doesn't
-    chatter frame to frame. Neutral (0.5 everywhere, i.e. defer entirely to
-    the magnitude-ratio mask) when the clip is too short for the pitch
-    tracker's analysis window -- real jobs are always many seconds long, but
-    this module's unit tests exercise it with few-hundred-sample fakes."""
+    chatter frame to frame. Defaults to a single stem (spoken, i.e. 0.0
+    everywhere) when the clip is too short for the pitch tracker's analysis
+    window -- real jobs are always many seconds long, but this module's unit
+    tests exercise it with few-hundred-sample fakes. (Not 0.5: a neutral
+    bias reproduces the plain, unarbitrated magnitude-ratio mask, which is
+    exactly the "50/50 split of one voice" bug this module exists to avoid
+    -- an uncertain default should pick a stem, not divide the bin.)
+
+    `accompaniment`, if given, feeds `_sung_score`'s beat-alignment/harmony-
+    fit features (see that function) -- both computed from the non-vocal
+    instrument bus, not from the vocal itself, so they stay informative even
+    where pYIN's own confidence collapses on a dense mix.
+
+    Diagnostic finding (job c226c717..., not yet acted on): the
+    `mono = spoken_raw + sung_raw` sum below is itself a contamination
+    source, independent of any instrumental bleed. Instrumental bleed into
+    this signal was checked and ruled out on both verified windows -- only
+    2.0-2.4% of its STFT power sits in time-frequency bins where the
+    accompaniment is comparably loud or louder, and its envelope barely
+    correlates with the accompaniment's (+0.035 Price monologue, -0.094
+    sung verse). But summing the two raw vocal estimates measurably
+    degrades pYIN's pitch tracking even when the secondary one is quiet:
+    on the Price monologue, running pYIN on Bandit's speech estimate alone
+    scores 0.901 frame accuracy against the verified spoken label, vs. 0.645
+    on this function's actual sum -- Demucs's vocal estimate there is ~14dB
+    down (mostly silence, correctly) but still corrupts the shared F0
+    estimate once mixed in. The indicated next step is to run pYIN
+    separately on each raw estimate and feed both resulting feature streams
+    into `_sung_score`, not to pick a single "presumptive source" input --
+    which one is right is exactly the thing being classified, so choosing
+    one upfront would be circular. Separately, the sung verse is NOT
+    explained by this: every candidate input (the sum, Bandit alone, Demucs
+    alone) scores below chance-for-sung there (best is 0.434) -- a
+    different, still-open calibration/feature problem."""
     mono = np.mean(spoken_raw + sung_raw, axis=0).astype(np.float64)
     if mono.shape[-1] < _PITCH_FRAME_LENGTH:
-        return np.full(n_frames, 0.5, dtype=np.float64)
+        return np.zeros(n_frames, dtype=np.float64)
 
     f0, _voiced_flag, voiced_prob = librosa.pyin(
         mono,
@@ -164,16 +298,33 @@ def _frame_sung_bias(spoken_raw: np.ndarray, sung_raw: np.ndarray, sample_rate: 
         fill_na=np.nan,
     )
     frame_rate_hz = sample_rate / HOP_LENGTH
-    score = _sung_score(f0, voiced_prob, frame_rate_hz)
+
+    beat_alignment = harmony_fit = None
+    if accompaniment is not None and accompaniment.shape[-1] >= _PITCH_FRAME_LENGTH:
+        accompaniment_mono = np.mean(accompaniment, axis=0).astype(np.float64)
+        beat_alignment = _rolling_beat_alignment(mono, accompaniment_mono, sample_rate, frame_rate_hz, len(f0))
+        harmony_fit = _rolling_harmony_fit(accompaniment_mono, sample_rate, f0, len(f0))
+
+    score = _sung_score(f0, voiced_prob, frame_rate_hz, beat_alignment, harmony_fit)
     score = _match_length(score, n_frames)
     voiced = _match_length(~np.isnan(f0), n_frames)
     return _hysteresis_smooth(score, voiced)
 
 
-def _sung_score(f0: np.ndarray, voiced_prob: np.ndarray, frame_rate_hz: float) -> np.ndarray:
-    """Combines pYIN's F0 track into a per-frame [0, 1] "does this look sung"
-    score from classical, cheap features -- no trained classifier:
+def _sung_score(
+    f0: np.ndarray,
+    voiced_prob: np.ndarray,
+    frame_rate_hz: float,
+    beat_alignment: np.ndarray | None = None,
+    harmony_fit: np.ndarray | None = None,
+) -> np.ndarray:
+    """Combines pYIN's F0 track (plus, when available, musical-context
+    evidence from the accompaniment) into a per-frame [0, 1] "does this look
+    sung" score from classical, cheap features -- no trained classifier:
     - harmonicity: pYIN's own voiced-probability (periodicity confidence).
+      Weakest feature on a dense, produced mix -- pYIN's confidence
+      collapses exactly where arbitration matters most, which is why it's
+      de-weighted (not dropped) once the two features below are available.
     - stability: how little the pitch *drifts* over ~100ms (a sustained note
       still wobbles with vibrato, but doesn't glissando the way speech does).
     - discreteness: how close the local mean pitch sits to an equal-tempered
@@ -181,6 +332,13 @@ def _sung_score(f0: np.ndarray, voiced_prob: np.ndarray, frame_rate_hz: float) -
     - vibrato: 4-8Hz oscillation energy in the local pitch contour.
     - duration: length of the current stable-and-voiced run (a briefly
       in-tune speech syllable isn't a held note).
+    - beat_alignment (optional): does the vocal's onset land on the
+      accompaniment's beat grid (`_rolling_beat_alignment`)? Sung phrasing
+      locks to the beat; speech doesn't. Independent of pitch tracking
+      entirely, so it doesn't degrade on a dense mix the way harmonicity does.
+    - harmony_fit (optional): does the vocal's F0 land on a chord tone of the
+      accompaniment (`_rolling_harmony_fit`)? Same rationale, independent
+      evidence source.
     Unvoiced frames (no detectable pitch at all) lean spoken, not neutral --
     that's consonants and breath, not ambiguous singing."""
     voiced = ~np.isnan(f0)
@@ -193,14 +351,100 @@ def _sung_score(f0: np.ndarray, voiced_prob: np.ndarray, frame_rate_hz: float) -
     duration = _stable_run_score(stability > 0.5, voiced)
     harmonicity = np.nan_to_num(voiced_prob, nan=0.0)
 
-    score = 0.30 * harmonicity + 0.25 * stability + 0.20 * discreteness + 0.15 * vibrato + 0.10 * duration
+    if beat_alignment is not None and harmony_fit is not None:
+        score = (
+            0.15 * harmonicity
+            + 0.20 * stability
+            + 0.15 * discreteness
+            + 0.10 * vibrato
+            + 0.10 * duration
+            + 0.15 * beat_alignment
+            + 0.15 * harmony_fit
+        )
+    else:
+        score = 0.30 * harmonicity + 0.25 * stability + 0.20 * discreteness + 0.15 * vibrato + 0.10 * duration
     return np.clip(np.where(voiced, score, 0.15), 0.0, 1.0)
+
+
+def _rolling_beat_alignment(
+    vocal_mono: np.ndarray, accompaniment_mono: np.ndarray, sample_rate: int, frame_rate_hz: float, n_frames: int
+) -> np.ndarray:
+    """1.0 where the vocal has a strong onset landing on (or near) the
+    accompaniment's beat grid, decaying with distance from the nearest beat
+    and held through a note's sustain rather than just its attack -- a sung
+    phrase's syllable onsets tend to land on the beat, a spoken line's don't.
+    Uses the accompaniment (not the vocal) to find the beat grid itself, so
+    this doesn't depend on the vocal having any detectable pitch at all."""
+    onset_env_accompaniment = librosa.onset.onset_strength(y=accompaniment_mono, sr=sample_rate, hop_length=HOP_LENGTH)
+    _tempo, beat_frames = librosa.beat.beat_track(onset_envelope=onset_env_accompaniment, sr=sample_rate, hop_length=HOP_LENGTH)
+    if len(beat_frames) == 0:
+        return np.zeros(n_frames, dtype=np.float64)
+
+    onset_env_vocal = librosa.onset.onset_strength(y=vocal_mono, sr=sample_rate, hop_length=HOP_LENGTH)
+    onset_env_vocal = _match_length(onset_env_vocal, n_frames)
+
+    frame_idx = np.arange(n_frames)
+    distance_frames = np.abs(frame_idx[:, None] - np.asarray(beat_frames)[None, :]).min(axis=1)
+    beat_proximity = np.exp(-(distance_frames / frame_rate_hz) / _BEAT_ALIGNMENT_TOLERANCE_SECONDS)
+
+    normalized_onset = onset_env_vocal / (onset_env_vocal.max() + _EPS)
+    aligned = normalized_onset * beat_proximity
+    hold_frames = max(int(round(_BEAT_ALIGNMENT_HOLD_SECONDS * frame_rate_hz)), 1)
+    return _rolling_trailing_max(aligned, hold_frames)
+
+
+def _rolling_harmony_fit(accompaniment_mono: np.ndarray, sample_rate: int, f0: np.ndarray, n_frames: int) -> np.ndarray:
+    """How much of the accompaniment's chroma energy, at each frame, sits at
+    the vocal's own pitch class -- chance level is 1/12 (pitch class
+    unrelated to the chord being played); a sung note that's actually a
+    chord tone should sit well above it, a spoken syllable's incidental
+    pitch shouldn't track harmony at all. Uses chroma_stft (not chroma_cqt)
+    to stay on the same cheap STFT machinery the rest of this module already
+    pays for, rather than adding a second, pricier transform."""
+    chroma = librosa.feature.chroma_stft(y=accompaniment_mono, sr=sample_rate, n_fft=N_FFT, hop_length=HOP_LENGTH)
+    chroma = chroma / (chroma.sum(axis=0, keepdims=True) + _EPS)
+    chroma = _match_length_axis(chroma, n_frames, axis=1)
+
+    voiced = ~np.isnan(f0)
+    # np.where evaluates both branches eagerly, so unvoiced frames' NaN midi
+    # (masked out below anyway) must be filled before the int cast, or it warns.
+    midi = np.nan_to_num(69.0 + 12.0 * np.log2(np.maximum(f0, _EPS) / 440.0), nan=69.0)
+    pitch_class = np.where(voiced, np.round(midi).astype(np.int64) % 12, 0)
+
+    fit = chroma[pitch_class, np.arange(n_frames)]
+    return np.clip(np.where(voiced, fit / _HARMONY_FIT_SCALE, 0.0), 0.0, 1.0)
 
 
 def _rolling_windows(x: np.ndarray, window: int) -> np.ndarray:
     half = window // 2
     padded = np.pad(x, (half, window - 1 - half), mode="edge")
     return np.lib.stride_tricks.sliding_window_view(padded, window)
+
+
+def _rolling_trailing_max(x: np.ndarray, window: int) -> np.ndarray:
+    """Max over `x[i - window + 1 : i + 1]` at each `i` -- a *trailing* max
+    (unlike `_rolling_windows`'s centered one), so a spike at frame `i`
+    (e.g. an onset) holds forward through the next `window` frames instead
+    of leaking backward before it happened."""
+    if window <= 1:
+        return x
+    padded = np.pad(x, (window - 1, 0), mode="edge")
+    return np.lib.stride_tricks.sliding_window_view(padded, window).max(axis=1)
+
+
+def _match_length_axis(arr: np.ndarray, target_len: int, axis: int) -> np.ndarray:
+    """Like `_match_length`, but along an arbitrary axis of an n-d array
+    (used for chroma's (12, T) shape instead of a 1-D per-frame score)."""
+    n = arr.shape[axis]
+    if n == target_len:
+        return arr
+    if n > target_len:
+        index = [slice(None)] * arr.ndim
+        index[axis] = slice(0, target_len)
+        return arr[tuple(index)]
+    pad_width = [(0, 0)] * arr.ndim
+    pad_width[axis] = (0, target_len - n)
+    return np.pad(arr, pad_width, mode="edge")
 
 
 def _rolling_stability(midi_filled: np.ndarray) -> np.ndarray:

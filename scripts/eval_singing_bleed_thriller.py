@@ -27,18 +27,29 @@ import soundfile as sf
 
 from backend import jobs, pool
 from backend.config import MUSIC_SAMPLE_RATE
-from backend.eval.metrics import cross_stem_leakage_fraction, window_rms_ratio
+from backend.eval.metrics import cross_stem_leakage_fraction, stem_envelope_correlation, window_rms_ratio
 from backend.separators.singing_sep import SPOKEN_STEM_NAME, SUNG_STEM_NAME
 from backend.storage import job_dir
 
 # (label, start_seconds, end_seconds, target_stem, min_acceptable_ratio)
 # Price monologue and verse are known-good baselines from before this fix —
-# they must not regress. The Thriller-laugh/bridge window is the bug report:
-# no established floor yet, just before-vs-after.
+# they must not regress. The bleed window is the bug report: one vocal
+# performance split spectrally between both stems rather than routed to one
+# (job c226c717..., listening test at 5:20-6:30) -- no established floor yet,
+# just before-vs-after.
+#
+# "outro (held-out)" was picked by an automated scan of the *whole* track
+# for a sustained, genuinely-active single-source stretch away from the
+# other three windows (scripts/find_holdout*.py, not checked in) -- it was
+# never used to tune _ARBITRATION_STRENGTH, the hysteresis thresholds, or
+# the beat/harmony feature weights. Price monologue and sung verse were
+# used for BOTH tuning and validation in earlier fixes, which is exactly
+# the overfitting risk a held-out window exists to catch.
 WINDOWS = [
     ("Price monologue (spoken)", 4 * 60 + 15, 4 * 60 + 52, SPOKEN_STEM_NAME, 15.2),
     ("sung verse", 2 * 60 + 20, 2 * 60 + 50, SUNG_STEM_NAME, 12.0),
-    ("bleed region (5:50-6:30)", 5 * 60 + 50, 6 * 60 + 30, None, None),
+    ("bleed region (5:20-6:30)", 5 * 60 + 20, 6 * 60 + 30, None, None),
+    ("outro (held-out, sung)", 12 * 60 + 20, 12 * 60 + 55, SUNG_STEM_NAME, None),
 ]
 
 
@@ -52,7 +63,7 @@ def _report(label: str, directory: Path) -> dict:
     spoken = _read_stem(directory, SPOKEN_STEM_NAME)
     sung = _read_stem(directory, SUNG_STEM_NAME)
     print(f"\n{label} ({directory})")
-    print(f"  {'window':<28} {'leakage frac':<14} {'target':<8} {'RMS ratio':<12}")
+    print(f"  {'window':<28} {'leakage frac':<14} {'correlation':<13} {'target':<8} {'RMS ratio':<12}")
     report = {}
     for window_label, start, end, target_name, min_ratio in WINDOWS:
         target = spoken if target_name == SPOKEN_STEM_NAME else sung if target_name == SUNG_STEM_NAME else None
@@ -63,11 +74,16 @@ def _report(label: str, directory: Path) -> dict:
         # slicing first would make a quiet residual bleed within the window
         # look identical to a loud one (see that function's docstring).
         leakage = cross_stem_leakage_fraction(spoken, sung, MUSIC_SAMPLE_RATE, start_seconds=start, end_seconds=end)
+        # Distinguishes real duplication (one performance split spectrally,
+        # both stems' envelopes rise/fall together) from mere co-activity,
+        # which leakage_fraction alone can't tell apart -- see that
+        # function's docstring.
+        correlation = stem_envelope_correlation(spoken, sung, MUSIC_SAMPLE_RATE, start, end)
         ratio = window_rms_ratio(target, other, MUSIC_SAMPLE_RATE, start, end) if target is not None else None
-        report[window_label] = {"leakage_fraction": leakage, "rms_ratio": ratio, "min_ratio": min_ratio}
+        report[window_label] = {"leakage_fraction": leakage, "correlation": correlation, "rms_ratio": ratio, "min_ratio": min_ratio}
         ratio_str = f"{ratio:.2f}x" if ratio is not None else "—"
         target_str = target_name or "—"
-        print(f"  {window_label:<28} {leakage:<14.3f} {target_str:<8} {ratio_str:<12}")
+        print(f"  {window_label:<28} {leakage:<14.3f} {correlation:<+13.3f} {target_str:<8} {ratio_str:<12}")
     return report
 
 
@@ -118,6 +134,11 @@ def main() -> None:
     for window_label, *_rest in WINDOWS:
         b, a = before[window_label]["leakage_fraction"], after[window_label]["leakage_fraction"]
         print(f"{window_label:<28} {b:<16.3f} {a:<16.3f}")
+
+    print(f"\n{'window':<28} {'before corr':<14} {'after corr':<14}")
+    for window_label, *_rest in WINDOWS:
+        b, a = before[window_label]["correlation"], after[window_label]["correlation"]
+        print(f"{window_label:<28} {b:<+14.3f} {a:<+14.3f}")
 
     if not ok:
         print("\nREGRESSION: a verified window's RMS ratio dropped below its required floor.", file=sys.stderr)
