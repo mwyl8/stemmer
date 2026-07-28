@@ -81,6 +81,7 @@ from scripts.eval_singing_classifier import (
     _window_frame_slice,
     compute_classifier_outputs,
     compute_raw_stems,
+    require_sources,
 )
 
 _ENTER_EXIT_COMBOS: list[tuple[str, int, int]] = [
@@ -508,6 +509,7 @@ def run_transition_lag_analysis() -> None:
 
 
 def main() -> None:
+    require_sources()
     run_auc_section()
     run_static_threshold_sweep()
     best_name, best_enter, best_exit = run_debounce_sweep()

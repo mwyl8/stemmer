@@ -20,11 +20,14 @@ Ground truth: hand-picked windows across 3 real tracks, each window labeled
 as a whole ("spoken" or "sung" for its entire span), not per-frame — see
 WINDOWS below, split explicitly into DEV_WINDOWS (used to look at the
 classifier while iterating) and TEST_WINDOWS (only for final confirmation,
-never for tuning). Two of the three tracks (Queen's "Somebody to Love" and
-Chaplin's "The Great Dictator" speech) were fetched fresh for this harness
-via the existing yt-dlp ingestion path and cached locally under
-data/eval_cache/ (gitignored, not redistributed) — see WINDOWS' comments for
-the significant caveat on the Queen timestamps.
+never for tuning). Thriller's source.wav was reused from an existing cached
+job (already fetched for earlier bleed-fix work); Queen's "Somebody to Love"
+was reused from an existing cached karaoke-mode job's source.wav; Chaplin's
+"The Great Dictator" speech was fetched fresh via
+`backend.ingest.ingest(url=...)`. All three end up as plain 44.1kHz stereo
+WAVs under data/eval_cache/sources/ (gitignored, not redistributed, not
+reproducible via a single script yet — see require_sources() below) — see
+WINDOWS' comments for the significant caveat on the Queen timestamps.
 
 Usage:
     uv run --group speech python scripts/eval_singing_classifier.py [--recompute]
@@ -397,15 +400,37 @@ def _print_metrics_table(rows: dict[str, dict[str, float]]) -> None:
         )
 
 
+def require_sources() -> None:
+    """Exits with a clear message (not a raw traceback from deep inside
+    soundfile/librosa) if any of TRACKS' source WAVs are missing -- the
+    normal state right after a fresh clone, since data/eval_cache/ is
+    gitignored and not shipped in the repo (CLAUDE.md: don't redistribute
+    fetched third-party audio). Called by both this script's main() and
+    eval_singing_classifier_calibration.py's, since the calibration script
+    hits the same missing-file case through several layers of caching
+    helpers before ever printing anything of its own."""
+    missing = [(track_id, path) for track_id, path in TRACKS.items() if not path.exists()]
+    if not missing:
+        return
+    print("Missing source audio -- data/eval_cache/ is gitignored, not included in the repo, and", file=sys.stderr)
+    print("not yet reproducible via a single script (tracked as a known gap). To populate it:", file=sys.stderr)
+    for track_id, path in missing:
+        print(f"  {track_id}: expected at {path}", file=sys.stderr)
+    print(
+        "Each file must be a 44.1kHz stereo WAV. See this file's module docstring for how the three\n"
+        "tracks used so far were originally fetched (backend.ingest.ingest(url=...), or copied from a\n"
+        "cached job's source.wav).",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--recompute", action="store_true", help="force re-running Bandit+Demucs and the classifier, ignoring any cache")
     args = parser.parse_args()
 
-    for track_id, path in TRACKS.items():
-        if not path.exists():
-            print(f"missing source audio for {track_id!r}: {path}", file=sys.stderr)
-            raise SystemExit(1)
+    require_sources()
 
     print("=" * 100)
     print("Computing classifier outputs (this is the slow part on a cache miss)...")
